@@ -1,77 +1,66 @@
-# OpenCV.js minimal whitelist for PaddleOCR frontend
+# OpenCV.js minimal build for PaddleOCR frontend
 #
 # Target:
-#   paddleocr-js frontend OCR
+#   paddleocr-js
 #
-# Keep:
-#   core + imgproc + required JS bindings
+# OpenCV:
+#   4.x
 #
-# Remove:
-#   dnn
-#   video
-#   objdetect
-#   features2d
-#   photo
-#   calib3d
+# Modules:
+#   core
+#   imgproc
 
 
-# =========================
+# ==========================
 # core
-# =========================
+# ==========================
 
 core = {
 
     '': [
 
-        # math
+        # matrix calculation
+
         'mean',
 
-        # matrix operation
         'split',
         'merge',
+
         'add',
         'subtract',
         'multiply',
+
         'normalize',
 
-        # image operation
+        'convertScaleAbs',
+
+
+        # bit operation
+
         'bitwise_and',
         'bitwise_or',
         'bitwise_not',
 
-        'convertScaleAbs',
 
-        # border
+        # image
+
         'copyMakeBorder',
 
-        # range
         'inRange',
 
+
         # rotate
+
         'rotate',
+
     ],
 
 
     # JS classes
 
-    'Mat': [
-        'Mat',
-        'clone',
-        'copyTo',
-        'convertTo',
-        'roi',
-        'size',
-        'type',
-    ],
+    'Mat': [],
 
-
-    'MatVector': [
-        'MatVector',
-        'size',
-        'get',
-        'push_back',
-    ],
-
+    'MatVector': [],
 
     'Scalar': [],
 
@@ -79,111 +68,140 @@ core = {
 
     'Rect': [],
 
+    'RotatedRect': [],
 
-    'RotatedRect': [
-        'points',
-        'boundingRect',
-    ],
 }
 
 
 
-# =========================
+# ==========================
 # imgproc
-# =========================
+# ==========================
 
 imgproc = {
 
     '': [
 
         # color
+
         'cvtColor',
 
 
         # resize
+
         'resize',
 
 
         # threshold
+
         'threshold',
+
         'adaptiveThreshold',
 
 
-        # contour detection
+        # contour
+
         'findContours',
+
         'drawContours',
+
         'approxPolyDP',
+
         'arcLength',
+
         'contourArea',
 
 
-        # box
+        # geometry
+
         'minAreaRect',
 
 
-        # perspective transform
+        # perspective
+
         'getPerspectiveTransform',
+
         'warpPerspective',
 
 
         # polygon
+
         'fillPoly',
+
         'polylines',
 
 
         # rotate
+
         'getRotationMatrix2D',
+
         'warpAffine',
 
 
         # filter
+
         'GaussianBlur',
+
     ]
+
 }
 
 
 
-# =========================
-# enum constants
-# =========================
+# ==========================
+# OpenCV constants
+# ==========================
 
 enums = [
 
-    # Border
+    # border
+
     'BORDER_REPLICATE',
 
 
-    # Contours
+    # contour
+
     'CHAIN_APPROX_SIMPLE',
+
     'RETR_LIST',
 
 
-    # Color
+    # color
+
     'COLOR_GRAY2BGR',
+
     'COLOR_RGBA2BGR',
 
 
     # interpolation
+
     'INTER_LINEAR',
+
     'INTER_CUBIC',
 
 
     # rotation
+
     'ROTATE_90_COUNTERCLOCKWISE',
 
 
     # Mat type
+
     'CV_8UC1',
+
     'CV_32FC1',
+
     'CV_32FC2',
+
     'CV_32SC2',
+
 ]
 
 
 
-# =========================
+# ==========================
 # generate whitelist
-# =========================
+# ==========================
 
 white_list = makeWhiteList(
     [
@@ -193,5 +211,4 @@ white_list = makeWhiteList(
 )
 
 
-# add enums
 white_list += enums
