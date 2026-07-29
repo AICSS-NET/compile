@@ -24,16 +24,32 @@ Emscripten 下）产出 `opencv.js`（约 153KB）+ `opencv_js.wasm`（约 2.8MB
 
 ## 如果 workflow 跑失败了
 
+### 情况一：报 `embind requires -std=c++17 or newer`
+
+已经修过了（workflow 里有一步 "修正 js 模块的 C++ 标准"，会自动把 OpenCV 源码里
+写死的 `-std=c++11` 改成 `-std=c++17`）——新版 Emscripten 的 embind 头文件要求
+C++17 起步，而 OpenCV `modules/js/CMakeLists.txt` 里写死了 `add_definitions("-std=c++11")`，
+这一行会覆盖掉单纯通过 cmake 参数传的标准设置，必须直接改源码这一行才行。
+只影响 `js` 这一个模块的编译标准，不影响 `core`/`imgproc` 本身（它们在别的目录，
+不受这行 `add_definitions` 影响），混用不同 C++ 标准编译、最后链接到一起，
+对这种代码来说是安全的，不用担心 ABI 不兼容。
+
+### 情况二：产物完整性校验那一步失败
+
 workflow 里有一步专门做"产物完整性校验"（`verify_opencv_build.js`），如果编译出来的
 `opencv.js` 缺少 `findContours`/`minAreaRect`/`warpPerspective` 等任何一个我们实际会
 用到的函数，这一步会让整个 workflow 直接标红失败，不会让一个"看起来编译成功、实际
-缺函数"的半成品被当成正常产物发布出来——这是我在沙盒环境里实测踩过的坑（旧版本
-Emscripten 下，编译"成功"了，但产物里缺了近一半需要的函数，具体原因没查清楚，怀疑
-是那个老版本工具链的 bug）。
+缺函数"的半成品被当成正常产物发布出来——这是我在沙盒环境里用旧版本 Emscripten（apt
+仓库里那个 2022 年的 3.1.6）实测踩过的坑，具体原因没查清楚，怀疑是那个老版本工具链的
+bug。换成 GitHub Actions 装的最新版 Emscripten 后，大概率不会再出现，如果还是失败，
+把失败日志里"缺失"的函数名列表发给我，我再帮你往下查。
 
-如果换了 GitHub Actions 用的最新版 Emscripten 之后，这一步还是失败：把失败日志里
-"缺失"的函数名列表发给我，我再帮你往下查——大概率还是某个 embind 绑定生成的兼容性
-问题，需要针对性调整 `opencv_js_minimal.config.py`。
+### 日志太长看不清楚重点？
+
+编译那一步（"编译精简版 opencv.js"）已经改成：成功时只打印最后 20 行摘要，失败时
+只打印日志里 `error` 关键字附近的上下文，不会把几千行的逐文件编译命令都刷出来。
+完整日志无论成功失败都会作为 `build-full-log` 这个 artifact 上传，摘要看不出问题
+时可以下载完整版接着排查。
 
 ## 这个配置文件是怎么来的
 
