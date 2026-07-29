@@ -24,15 +24,15 @@ Emscripten 下）产出 `opencv.js`（约 153KB）+ `opencv_js.wasm`（约 2.8MB
 
 ## 如果 workflow 跑失败了
 
-### 情况一：报 `embind requires -std=c++17 or newer`
+### 情况一：报 `embind requires -std=c++17 or newer` / `DEMANGLE_SUPPORT: No longer supported`
 
-已经修过了（workflow 里有一步 "修正 js 模块的 C++ 标准"，会自动把 OpenCV 源码里
-写死的 `-std=c++11` 改成 `-std=c++17`）——新版 Emscripten 的 embind 头文件要求
-C++17 起步，而 OpenCV `modules/js/CMakeLists.txt` 里写死了 `add_definitions("-std=c++11")`，
-这一行会覆盖掉单纯通过 cmake 参数传的标准设置，必须直接改源码这一行才行。
-只影响 `js` 这一个模块的编译标准，不影响 `core`/`imgproc` 本身（它们在别的目录，
-不受这行 `add_definitions` 影响），混用不同 C++ 标准编译、最后链接到一起，
-对这种代码来说是安全的，不用担心 ABI 不兼容。
+已经修过了（workflow 里有一步 "修正 js 模块的 C++ 标准 + 替换新版 Emscripten 已废弃/改名的参数"），一共修了三处 OpenCV 源码里写死的、新版 Emscripten 不再兼容的老写法：
+
+- `add_definitions("-std=c++11")` → 改成 `-std=c++17`：新版 Emscripten 的 embind 头文件要求 C++17 起步，而这行写死的标准会覆盖掉单纯通过 cmake 参数传的设置，必须直接改源码这一行。只影响 `js` 这一个模块的编译标准，不影响 `core`/`imgproc` 本身（它们在别的目录，不受这行 `add_definitions` 影响），混用不同 C++ 标准编译、最后链接到一起，对这种代码是安全的，不用担心 ABI 不兼容。
+- `-s DEMANGLE_SUPPORT=1` → 直接删掉：这个链接参数在新版 Emscripten 里被完全移除了，传了就直接报错退出。
+- `-s TOTAL_MEMORY=...` / `-s WASM_MEM_MAX=...` → 改名成 `-s INITIAL_MEMORY=...` / `-s MAXIMUM_MEMORY=...`：这是官方文档里当前的正式名字，旧名字大概率也会在新版工具链下失效，一起改掉，省得再跑一轮才踩到。
+
+如果换了更新的 Emscripten 版本之后，又出现别的"某个参数不再支持/被改名"类型的报错，规律都是一样的：去 `opencv/modules/js/CMakeLists.txt` 里找到那一行，按新版 Emscripten 官方文档（`https://emscripten.org/docs/tools_reference/settings_reference.html`）里的当前写法改掉就行，把报错内容发给我，我也可以帮你确认。
 
 ### 情况二：产物完整性校验那一步失败
 
