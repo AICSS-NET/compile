@@ -1,216 +1,197 @@
-# Classes and methods whitelist
+# OpenCV.js minimal whitelist for PaddleOCR frontend
+#
+# Target:
+#   paddleocr-js frontend OCR
+#
+# Keep:
+#   core + imgproc + required JS bindings
+#
+# Remove:
+#   dnn
+#   video
+#   objdetect
+#   features2d
+#   photo
+#   calib3d
+
+
+# =========================
+# core
+# =========================
 
 core = {
+
     '': [
-        'absdiff', 'add', 'addWeighted', 'bitwise_and', 'bitwise_not', 'bitwise_or', 'bitwise_xor', 'cartToPolar',
-        'compare', 'convertScaleAbs', 'copyMakeBorder', 'countNonZero', 'determinant', 'dft', 'divide', 'eigen',
-        'exp', 'flip', 'getOptimalDFTSize','gemm', 'hconcat', 'inRange', 'invert', 'kmeans', 'log', 'magnitude',
-        'max', 'mean', 'meanStdDev', 'merge', 'min', 'minMaxLoc', 'mixChannels', 'multiply', 'norm', 'normalize',
-        'perspectiveTransform', 'polarToCart', 'pow', 'randn', 'randu', 'reduce', 'repeat', 'rotate', 'setIdentity', 'setRNGSeed',
-        'solve', 'solvePoly', 'split', 'sqrt', 'subtract', 'trace', 'transform', 'transpose', 'vconcat',
-        'setLogLevel', 'getLogLevel',
-        'LUT',
+
+        # math
+        'mean',
+
+        # matrix operation
+        'split',
+        'merge',
+        'add',
+        'subtract',
+        'multiply',
+        'normalize',
+
+        # image operation
+        'bitwise_and',
+        'bitwise_or',
+        'bitwise_not',
+
+        'convertScaleAbs',
+
+        # border
+        'copyMakeBorder',
+
+        # range
+        'inRange',
+
+        # rotate
+        'rotate',
     ],
-    'Algorithm': [],
+
+
+    # JS classes
+
+    'Mat': [
+        'Mat',
+        'clone',
+        'copyTo',
+        'convertTo',
+        'roi',
+        'size',
+        'type',
+    ],
+
+
+    'MatVector': [
+        'MatVector',
+        'size',
+        'get',
+        'push_back',
+    ],
+
+
+    'Scalar': [],
+
+    'Size': [],
+
+    'Rect': [],
+
+
+    'RotatedRect': [
+        'points',
+        'boundingRect',
+    ],
 }
+
+
+
+# =========================
+# imgproc
+# =========================
 
 imgproc = {
+
     '': [
-        'Canny',
-        'GaussianBlur',
-        'Laplacian',
-        'HoughLines',
-        'HoughLinesP',
-        'HoughCircles',
-        'Scharr',
-        'Sobel',
+
+        # color
+        'cvtColor',
+
+
+        # resize
+        'resize',
+
+
+        # threshold
+        'threshold',
         'adaptiveThreshold',
+
+
+        # contour detection
+        'findContours',
+        'drawContours',
         'approxPolyDP',
         'arcLength',
-        'bilateralFilter',
-        'blur',
-        'boundingRect',
-        'boxFilter',
-        'calcBackProject',
-        'calcHist',
-        'circle',
-        'compareHist',
-        'connectedComponents',
-        'connectedComponentsWithStats',
         'contourArea',
-        'convexHull',
-        'convexityDefects',
-        'cornerHarris',
-        'cornerMinEigenVal',
-        'createCLAHE',
-        'createLineSegmentDetector',
-        'cvtColor',
-        'demosaicing',
-        'dilate',
-        'distanceTransform',
-        'distanceTransformWithLabels',
-        'drawContours',
-        'ellipse',
-        'ellipse2Poly',
-        'equalizeHist',
-        'erode',
-        'filter2D',
-        'findContours',
-        'fitEllipse',
-        'fitLine',
-        'floodFill',
-        'getAffineTransform',
-        'getPerspectiveTransform',
-        'getRotationMatrix2D',
-        'getStructuringElement',
-        'goodFeaturesToTrack',
-        'grabCut',
-        #'initUndistortRectifyMap',  # 4.x: moved to calib3d
-        'integral',
-        'integral2',
-        'isContourConvex',
-        'line',
-        'matchShapes',
-        'matchTemplate',
-        'medianBlur',
+
+
+        # box
         'minAreaRect',
-        'minEnclosingCircle',
-        'moments',
-        'morphologyEx',
-        'pointPolygonTest',
-        'putText',
-        'pyrDown',
-        'pyrUp',
-        'rectangle',
-        'remap',
-        'resize',
-        'sepFilter2D',
-        'threshold',
-        #'undistort',  # 4.x: moved to calib3d
-        'warpAffine',
+
+
+        # perspective transform
+        'getPerspectiveTransform',
         'warpPerspective',
-        'warpPolar',
-        'watershed',
+
+
+        # polygon
         'fillPoly',
-        'fillConvexPoly',
         'polylines',
-    ],
-    'CLAHE': ['apply', 'collectGarbage', 'getClipLimit', 'getTilesGridSize', 'setClipLimit', 'setTilesGridSize'],
-    'segmentation_IntelligentScissorsMB': [
-        'IntelligentScissorsMB',
-        'setWeights',
-        'setGradientMagnitudeMaxLimit',
-        'setEdgeFeatureZeroCrossingParameters',
-        'setEdgeFeatureCannyParameters',
-        'applyImage',
-        'applyImageFeatures',
-        'buildMap',
-        'getContour'
-    ],
+
+
+        # rotate
+        'getRotationMatrix2D',
+        'warpAffine',
+
+
+        # filter
+        'GaussianBlur',
+    ]
 }
 
-objdetect = {'': ['groupRectangles', 'getPredefinedDictionary', 'extendDictionary',
-                  'drawDetectedMarkers', 'generateImageMarker', 'drawDetectedCornersCharuco',
-                  'drawDetectedDiamonds'],
-             'HOGDescriptor': ['load', 'HOGDescriptor', 'getDefaultPeopleDetector', 'getDaimlerPeopleDetector', 'setSVMDetector', 'detectMultiScale'],
-             'CascadeClassifier': ['load', 'detectMultiScale2', 'CascadeClassifier', 'detectMultiScale3', 'empty', 'detectMultiScale'],
-             'GraphicalCodeDetector': ['decode', 'detect', 'detectAndDecode', 'detectMulti', 'decodeMulti', 'detectAndDecodeMulti'],
-             'QRCodeDetector': ['QRCodeDetector', 'decode', 'detect', 'detectAndDecode', 'detectMulti', 'decodeMulti', 'detectAndDecodeMulti', 'decodeCurved', 'detectAndDecodeCurved', 'setEpsX', 'setEpsY'],
-             'aruco_PredefinedDictionaryType': [],
-             'aruco_Dictionary': ['Dictionary', 'getDistanceToId', 'generateImageMarker', 'getByteListFromBits', 'getBitsFromByteList'],
-             'aruco_Board': ['Board', 'matchImagePoints', 'generateImage'],
-             'aruco_GridBoard': ['GridBoard', 'generateImage', 'getGridSize', 'getMarkerLength', 'getMarkerSeparation', 'matchImagePoints'],
-             'aruco_CharucoParameters': ['CharucoParameters'],
-             'aruco_CharucoBoard': ['CharucoBoard', 'generateImage', 'getChessboardCorners', 'getNearestMarkerCorners', 'checkCharucoCornersCollinear', 'matchImagePoints', 'getLegacyPattern', 'setLegacyPattern'],
-             'aruco_DetectorParameters': ['DetectorParameters'],
-             'aruco_RefineParameters': ['RefineParameters'],
-             'aruco_ArucoDetector': ['ArucoDetector', 'detectMarkers', 'refineDetectedMarkers', 'setDictionary', 'setDetectorParameters', 'setRefineParameters'],
-             'aruco_CharucoDetector': ['CharucoDetector', 'setBoard', 'setCharucoParameters', 'setDetectorParameters', 'setRefineParameters', 'detectBoard', 'detectDiamonds'],
-             'QRCodeDetectorAruco_Params': ['Params'],
-             'QRCodeDetectorAruco': ['QRCodeDetectorAruco', 'decode', 'detect', 'detectAndDecode', 'detectMulti', 'decodeMulti', 'detectAndDecodeMulti', 'setDetectorParameters', 'setArucoParameters'],
-             'barcode_BarcodeDetector': ['BarcodeDetector', 'decode', 'detect', 'detectAndDecode', 'detectMulti', 'decodeMulti', 'detectAndDecodeMulti', 'decodeWithType', 'detectAndDecodeWithType'],
-             'FaceDetectorYN': ['setInputSize', 'getInputSize', 'setScoreThreshold', 'getScoreThreshold', 'setNMSThreshold', 'getNMSThreshold',
-                                'setTopK', 'getTopK', 'detect', 'create'],
-}
 
-video = {
-    '': [
-        'CamShift',
-        'calcOpticalFlowFarneback',
-        'calcOpticalFlowPyrLK',
-        'createBackgroundSubtractorMOG2',
-        'findTransformECC',
-        'meanShift',
-    ],
-    'BackgroundSubtractorMOG2': ['BackgroundSubtractorMOG2', 'apply'],
-    'BackgroundSubtractor': ['apply', 'getBackgroundImage'],
-    # issue #21070: 'Tracker': ['init', 'update'],
-    'TrackerMIL': ['create'],
-    'TrackerMIL_Params': [],
-}
 
-dnn = {'dnn_Net': ['setInput', 'forward', 'setPreferableBackend','getUnconnectedOutLayersNames'],
-       '': ['readNetFromCaffe', 'readNetFromTensorflow', 'readNetFromTorch', 'readNetFromDarknet',
-            'readNetFromONNX', 'readNetFromTFLite', 'readNet', 'blobFromImage']}
+# =========================
+# enum constants
+# =========================
 
-features2d = {'Feature2D': ['detect', 'compute', 'detectAndCompute', 'descriptorSize', 'descriptorType', 'defaultNorm', 'empty', 'getDefaultName'],
-              'BRISK': ['create', 'getDefaultName'],
-              'ORB': ['create', 'setMaxFeatures', 'setScaleFactor', 'setNLevels', 'setEdgeThreshold', 'setFastThreshold', 'setFirstLevel', 'setWTA_K', 'setScoreType', 'setPatchSize', 'getFastThreshold', 'getDefaultName'],
-              'MSER': ['create', 'detectRegions', 'setDelta', 'getDelta', 'setMinArea', 'getMinArea', 'setMaxArea', 'getMaxArea', 'setPass2Only', 'getPass2Only', 'getDefaultName'],
-              'FastFeatureDetector': ['create', 'setThreshold', 'getThreshold', 'setNonmaxSuppression', 'getNonmaxSuppression', 'setType', 'getType', 'getDefaultName'],
-              'AgastFeatureDetector': ['create', 'setThreshold', 'getThreshold', 'setNonmaxSuppression', 'getNonmaxSuppression', 'setType', 'getType', 'getDefaultName'],
-              'GFTTDetector': ['create', 'setMaxFeatures', 'getMaxFeatures', 'setQualityLevel', 'getQualityLevel', 'setMinDistance', 'getMinDistance', 'setBlockSize', 'getBlockSize', 'setHarrisDetector', 'getHarrisDetector', 'setK', 'getK', 'getDefaultName'],
-              'SimpleBlobDetector': ['create', 'setParams', 'getParams', 'getDefaultName'],
-              'SimpleBlobDetector_Params': [],
-              'KAZE': ['create', 'setExtended', 'getExtended', 'setUpright', 'getUpright', 'setThreshold', 'getThreshold', 'setNOctaves', 'getNOctaves', 'setNOctaveLayers', 'getNOctaveLayers', 'setDiffusivity', 'getDiffusivity', 'getDefaultName'],
-              'AKAZE': ['create', 'setDescriptorType', 'getDescriptorType', 'setDescriptorSize', 'getDescriptorSize', 'setDescriptorChannels', 'getDescriptorChannels', 'setThreshold', 'getThreshold', 'setNOctaves', 'getNOctaves', 'setNOctaveLayers', 'getNOctaveLayers', 'setDiffusivity', 'getDiffusivity', 'getDefaultName'],
-              'DescriptorMatcher': ['add', 'clear', 'empty', 'isMaskSupported', 'train', 'match', 'knnMatch', 'radiusMatch', 'clone', 'create'],
-              'BFMatcher': ['isMaskSupported', 'create'],
-              '': ['drawKeypoints', 'drawMatches', 'drawMatchesKnn']}
+enums = [
 
-photo = {'': ['createAlignMTB', 'createCalibrateDebevec', 'createCalibrateRobertson', \
-              'createMergeDebevec', 'createMergeMertens', 'createMergeRobertson', \
-              'createTonemapDrago', 'createTonemapMantiuk', 'createTonemapReinhard', 'inpaint'],
-        'CalibrateCRF': ['process'],
-        'AlignMTB' : ['calculateShift', 'shiftMat', 'computeBitmaps', 'getMaxBits', 'setMaxBits', \
-                      'getExcludeRange', 'setExcludeRange', 'getCut', 'setCut'],
-        'CalibrateDebevec' : ['getLambda', 'setLambda', 'getSamples', 'setSamples', 'getRandom', 'setRandom'],
-        'CalibrateRobertson' : ['getMaxIter', 'setMaxIter', 'getThreshold', 'setThreshold', 'getRadiance'],
-        'MergeExposures' : ['process'],
-        'MergeDebevec' : ['process'],
-        'MergeMertens' : ['process', 'getContrastWeight', 'setContrastWeight', 'getSaturationWeight', \
-                          'setSaturationWeight', 'getExposureWeight', 'setExposureWeight'],
-        'MergeRobertson' : ['process'],
-        'Tonemap' : ['process' , 'getGamma', 'setGamma'],
-        'TonemapDrago' : ['getSaturation', 'setSaturation', 'getBias', 'setBias', \
-                          'getSigmaColor', 'setSigmaColor', 'getSigmaSpace','setSigmaSpace'],
-        'TonemapMantiuk' : ['getScale', 'setScale', 'getSaturation', 'setSaturation'],
-        'TonemapReinhard' : ['getIntensity', 'setIntensity', 'getLightAdaptation', 'setLightAdaptation', \
-                             'getColorAdaptation', 'setColorAdaptation']
-        }
+    # Border
+    'BORDER_REPLICATE',
 
-calib3d = {
-    '': [
-        'findHomography',
-        'calibrateCameraExtended',
-        'drawFrameAxes',
-        'estimateAffine2D',
-        'getDefaultNewCameraMatrix',
-        'initUndistortRectifyMap',
-        'Rodrigues',
-        'solvePnP',
-        'solvePnPRansac',
-        'solvePnPRefineLM',
-        'projectPoints',
-        'undistort',
 
-        # cv::fisheye namespace
-        'fisheye_initUndistortRectifyMap',
-        'fisheye_projectPoints',
-    ],
-}
+    # Contours
+    'CHAIN_APPROX_SIMPLE',
+    'RETR_LIST',
 
-white_list = makeWhiteList([core, imgproc])
 
-# namespace_prefix_override['dnn'] = ''  # compatibility stuff (enabled by default)
-# namespace_prefix_override['aruco'] = ''  # compatibility stuff (enabled by default)
+    # Color
+    'COLOR_GRAY2BGR',
+    'COLOR_RGBA2BGR',
+
+
+    # interpolation
+    'INTER_LINEAR',
+    'INTER_CUBIC',
+
+
+    # rotation
+    'ROTATE_90_COUNTERCLOCKWISE',
+
+
+    # Mat type
+    'CV_8UC1',
+    'CV_32FC1',
+    'CV_32FC2',
+    'CV_32SC2',
+]
+
+
+
+# =========================
+# generate whitelist
+# =========================
+
+white_list = makeWhiteList(
+    [
+        core,
+        imgproc,
+    ]
+)
+
+
+# add enums
+white_list += enums
