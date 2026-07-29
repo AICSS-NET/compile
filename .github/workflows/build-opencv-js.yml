@@ -1,119 +1,118 @@
-name: Build minimal opencv.js (core + imgproc only)
+name: Build OpenCV.js Minimal
 
-# 触发方式：
-#   1. 手动点 "Run workflow" 按钮触发（推荐，按需构建）
-#   2. push 到 main 分支时自动触发（如果不想每次 push 都编译，把下面 push 那几行删掉）
+
 on:
+
   workflow_dispatch:
 
+
+
 jobs:
+
   build:
-    # GitHub 官方 runner：4 核 CPU / 16GB 内存，比沙盒环境的 1 核强很多，
-    # 编译这个精简过的 core+imgproc 子集，正常情况下十几分钟内能跑完。
+
     runs-on: ubuntu-latest
+
+
     steps:
-      - name: 检出仓库（拿到白名单配置文件）
-        uses: actions/checkout@v4
 
-      # 官方 emsdk 安装器需要访问 storage.googleapis.com，
-      # GitHub Actions 的 runner 有完整公网访问权限，跟沙盒环境不一样，这一步能正常跑。
-      - name: 安装最新版 Emscripten 工具链
-        run: |
-          git clone https://github.com/emscripten-core/emsdk.git
-          cd emsdk
-          ./emsdk install latest
-          ./emsdk activate latest
 
-      - name: 安装 cmake / ninja
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq cmake ninja-build
+    - name: Checkout
 
-      # 版本号要跟 npm 上 @techstark/opencv-js 用的版本对齐，
-      # 保证生成的 API 跟现在项目里用的调用方式兼容。
-      - name: 拉取 OpenCV 4.10.0 源码
-        run: git clone --depth 1 --branch 4.10.0 https://github.com/opencv/opencv.git
+      uses: actions/checkout@v4
 
-      # 新版 Emscripten 的 embind 头文件（bind.h/wire.h）要求 C++17 起步，
-      # 但 OpenCV modules/js/CMakeLists.txt 里写死了 add_definitions("-std=c++11")，
-      # 这一行会覆盖掉通过 -DCMAKE_CXX_STANDARD=17 传的设置（后出现的 -std 参数
-      # 优先级更高），必须直接把源码里这一行改掉，光传 cmake 参数是不够的。
-      #
-      # 另外，新版 Emscripten 移除/改名了几个老的链接参数：
-      #   - DEMANGLE_SUPPORT：整个移除了（"No longer supported"），直接删掉
-      #   - TOTAL_MEMORY → 改名成 INITIAL_MEMORY
-      #   - WASM_MEM_MAX  → 改名成 MAXIMUM_MEMORY
-      # 这三个都是 OpenCV 这份 CMakeLists.txt 写死的老参数名，新版工具链下要么
-      # 直接报错退出（DEMANGLE_SUPPORT 已经实测踩到了），要么改名后旧名字不再
-      # 生效，所以一并改掉，不逐个踩坑浪费构建时间。
-      - name: 修正 js 模块的 C++ 标准 + 替换新版 Emscripten 已废弃/改名的参数
-        run: |
-          sed -i 's/add_definitions("-std=c++11")/add_definitions("-std=c++17")/' \
-            opencv/modules/js/CMakeLists.txt
-          sed -i 's/ -s DEMANGLE_SUPPORT=1//' \
-            opencv/modules/js/CMakeLists.txt
-          sed -i 's/TOTAL_MEMORY/INITIAL_MEMORY/g; s/WASM_MEM_MAX/MAXIMUM_MEMORY/g' \
-            opencv/modules/js/CMakeLists.txt
-          grep -n "std=c++\|DEMANGLE_SUPPORT\|EXPORT_NAME\|INITIAL_MEMORY\|MAXIMUM_MEMORY" \
-            opencv/modules/js/CMakeLists.txt
 
-      # 把完整输出重定向到日志文件，成功时只打印一个简短摘要，失败时只打印
-      # 日志里 error 附近的上下文（而不是几千行的每文件编译命令），完整日志
-      # 始终会作为 artifact 上传，摘要看不出问题时可以下载完整版接着排查。
-      - name: 编译精简版 opencv.js（只含 core + imgproc）
-        id: build
-        run: |
-          source emsdk/emsdk_env.sh
-          set +e
-          python3 opencv/platforms/js/build_js.py build_output \
-            --build_wasm \
-            --disable_single_file \
-            --config "$(pwd)/opencv_js_minimal.config.py" \
-            --cmake_option="-DBUILD_LIST=core,imgproc,js" \
-            --cmake_option="-DCMAKE_CXX_STANDARD=17" \
-            --cmake_option="-DCMAKE_CXX_STANDARD_REQUIRED=ON" \
-            --cmake_option="-DBUILD_TESTS=OFF" \
-            --cmake_option="-DBUILD_PERF_TESTS=OFF" \
-            --cmake_option="-DBUILD_EXAMPLES=OFF" \
-            --emscripten_dir="$(pwd)/emsdk/upstream/emscripten" \
-            > build_full.log 2>&1
-          status=$?
-          if [ $status -ne 0 ]; then
-            echo "::error::编译失败（退出码 $status），下面只显示日志里 error 附近的内容："
-            echo "----------------------------------------------------------------"
-            grep -n -i -B2 -A6 "error" build_full.log | tail -400
-            echo "----------------------------------------------------------------"
-            echo "以上是摘要，看不出问题的话，去这次运行的 Artifacts 里下载完整日志 build-full-log。"
-            exit $status
-          else
-            echo "✅ 编译成功，日志摘要（最后 20 行）："
-            tail -20 build_full.log
-          fi
 
-      # 不管成功失败都上传完整日志，方便摘要看不出问题时深挖。
-      - name: 上传完整构建日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-full-log
-          path: build_full.log
-          retention-days: 14
+    - name: Install dependencies
 
-      # 关键一步：编译成功不代表产物是对的（沙盒环境里就遇到过，老版本工具链下
-      # 编译"成功"了，但一部分函数在最终产物里却是缺失的）。这里显式核对我们
-      # 实际用到的每一个函数/常量是不是真的都在产物里，少一个就让整个workflow
-      # 失败，不会让一个"看起来编译成功但实际缺东西"的半成品被当成正常产物下载走。
-      - name: 校验产物包含全部需要用到的函数（构建产物完整性门禁）
-        run: node verify_opencv_build.js build_output/bin/opencv.js
+      run: |
 
-      - name: 打包产物
-        run: |
-          mkdir -p dist
-          cp build_output/bin/opencv.js dist/
-          cp build_output/bin/opencv_js.wasm dist/
-          ls -la dist/
+        sudo apt update
 
-      - name: 上传构建产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: opencv-js-minimal
-          path: dist/
-          retention-days: 30
+        sudo apt install -y \
+          cmake \
+          python3 \
+          python3-pip \
+          build-essential
+
+
+
+    - name: Install Emscripten
+
+      run: |
+
+        git clone https://github.com/emscripten-core/emsdk.git
+
+        cd emsdk
+
+        ./emsdk install latest
+
+        ./emsdk activate latest
+
+
+
+    - name: Clone OpenCV 4.12.0
+
+      run: |
+
+        git clone \
+          --depth 1 \
+          --branch 4.12.0 \
+          https://github.com/opencv/opencv.git
+
+
+
+    - name: Build OpenCV.js
+
+      shell: bash
+
+      run: |
+
+        source emsdk/emsdk_env.sh
+
+
+        python3 opencv/platforms/js/build_js.py \
+          build_output \
+          --build_wasm \
+          --disable_single_file \
+          --config "$(pwd)/opencv_js_minimal.config.py" \
+          --cmake_option="-DBUILD_LIST=core,imgproc" \
+          --cmake_option="-DBUILD_TESTS=OFF" \
+          --cmake_option="-DBUILD_PERF_TESTS=OFF" \
+          --cmake_option="-DBUILD_EXAMPLES=OFF"
+
+
+
+    - name: Verify OpenCV.js
+
+      run: |
+
+        node verify_opencv_build.js \
+          build_output/bin/opencv.js
+
+
+
+    - name: Package
+
+      run: |
+
+        mkdir release
+
+
+        cp build_output/bin/opencv.js release/
+
+        cp build_output/bin/opencv_js.wasm release/
+
+
+
+    - name: Upload artifact
+
+      uses: actions/upload-artifact@v4
+
+      with:
+
+        name: opencv-js-paddleocr-minimal
+
+        path:
+
+          release/
