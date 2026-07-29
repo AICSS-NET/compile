@@ -28,7 +28,6 @@ const NEEDED = [
     "mean",
 
 
-
     // classes
 
     "Mat",
@@ -42,7 +41,6 @@ const NEEDED = [
     "Size",
 
     "Scalar",
-
 
 
     // constants
@@ -90,15 +88,20 @@ if (!filePath) {
 
 
 
-const content = fs.readFileSync(
+const data = fs.readFileSync(
+
     filePath,
+
     "utf8"
+
 );
 
 
 
 const missing = NEEDED.filter(
-    item => !content.includes(item)
+
+    item => !data.includes(item)
+
 );
 
 
@@ -123,15 +126,18 @@ if (missing.length > 0) {
 
 
     console.error(
-        "\n❌ OpenCV.js 缺少 PaddleOCR 必需 API:"
+        "\n❌ OpenCV.js 不完整:"
     );
 
 
     missing.forEach(
+
         item =>
+
             console.error(
                 " - " + item
             )
+
     );
 
 
@@ -142,5 +148,7 @@ if (missing.length > 0) {
 
 
 console.log(
+
     "\n✅ OpenCV.js 满足 PaddleOCR 前端需求"
+
 );
