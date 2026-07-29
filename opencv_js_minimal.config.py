@@ -1,82 +1,55 @@
-# OpenCV.js minimal build for PaddleOCR frontend
-#
-# Target:
-#   paddleocr-js
-#
-# OpenCV:
-#   4.x
-#
-# Modules:
-#   core
-#   imgproc
+# OpenCV.js minimal config
+# PaddleOCR frontend
 
-
-# ==========================
-# core
-# ==========================
 
 core = {
 
     '': [
 
-        # matrix calculation
+        # matrix
 
         'mean',
 
         'split',
+
         'merge',
 
         'add',
+
         'subtract',
+
         'multiply',
 
         'normalize',
 
-        'convertScaleAbs',
-
-
-        # bit operation
-
-        'bitwise_and',
-        'bitwise_or',
-        'bitwise_not',
-
 
         # image
+
+        'convertScaleAbs',
 
         'copyMakeBorder',
 
         'inRange',
 
 
+        # bit
+
+        'bitwise_and',
+
+        'bitwise_or',
+
+        'bitwise_not',
+
+
         # rotate
 
         'rotate',
 
-    ],
-
-
-    # JS classes
-
-    'Mat': [],
-
-    'MatVector': [],
-
-    'Scalar': [],
-
-    'Size': [],
-
-    'Rect': [],
-
-    'RotatedRect': [],
+    ]
 
 }
 
 
-
-# ==========================
-# imgproc
-# ==========================
 
 imgproc = {
 
@@ -112,7 +85,7 @@ imgproc = {
         'contourArea',
 
 
-        # geometry
+        # rectangle
 
         'minAreaRect',
 
@@ -131,7 +104,7 @@ imgproc = {
         'polylines',
 
 
-        # rotate
+        # affine
 
         'getRotationMatrix2D',
 
@@ -148,44 +121,17 @@ imgproc = {
 
 
 
-# ==========================
-# OpenCV constants
-# ==========================
+# required enum
 
 enums = [
 
-    # border
-
     'BORDER_REPLICATE',
 
-
-    # contour
-
     'CHAIN_APPROX_SIMPLE',
-
-    'RETR_LIST',
-
-
-    # color
 
     'COLOR_GRAY2BGR',
 
     'COLOR_RGBA2BGR',
-
-
-    # interpolation
-
-    'INTER_LINEAR',
-
-    'INTER_CUBIC',
-
-
-    # rotation
-
-    'ROTATE_90_COUNTERCLOCKWISE',
-
-
-    # Mat type
 
     'CV_8UC1',
 
@@ -195,20 +141,30 @@ enums = [
 
     'CV_32SC2',
 
+    'INTER_LINEAR',
+
+    'INTER_CUBIC',
+
+    'RETR_LIST',
+
+    'ROTATE_90_COUNTERCLOCKWISE',
+
 ]
 
 
 
-# ==========================
-# generate whitelist
-# ==========================
-
 white_list = makeWhiteList(
+
     [
+
         core,
+
         imgproc,
+
     ]
+
 )
+
 
 
 white_list += enums
