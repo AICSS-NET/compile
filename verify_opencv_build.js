@@ -1,32 +1,25 @@
 #!/usr/bin/env node
 
-// Verify minimal OpenCV.js build for paddleocr-js
-
 
 const fs = require("fs");
 
 
+
 const NEEDED = [
 
-    // classes/functions
+    // functions
 
     "cvtColor",
+
     "resize",
 
     "findContours",
+
     "minAreaRect",
 
-    "RotatedRect",
-
     "getPerspectiveTransform",
+
     "warpPerspective",
-
-    "Mat",
-    "MatVector",
-
-    "Rect",
-    "Size",
-    "Scalar",
 
     "fillPoly",
 
@@ -36,23 +29,43 @@ const NEEDED = [
 
 
 
-    // enums
+    // classes
+
+    "Mat",
+
+    "MatVector",
+
+    "RotatedRect",
+
+    "Rect",
+
+    "Size",
+
+    "Scalar",
+
+
+
+    // constants
 
     "BORDER_REPLICATE",
 
     "CHAIN_APPROX_SIMPLE",
 
     "COLOR_GRAY2BGR",
-    "COLOR_RGBA2BGR",
 
-    "CV_32FC1",
-    "CV_32FC2",
-    "CV_32SC2",
+    "COLOR_RGBA2BGR",
 
     "CV_8UC1",
 
-    "INTER_CUBIC",
+    "CV_32FC1",
+
+    "CV_32FC2",
+
+    "CV_32SC2",
+
     "INTER_LINEAR",
+
+    "INTER_CUBIC",
 
     "RETR_LIST",
 
@@ -72,11 +85,12 @@ if (!filePath) {
     );
 
     process.exit(2);
+
 }
 
 
 
-const data = fs.readFileSync(
+const content = fs.readFileSync(
     filePath,
     "utf8"
 );
@@ -84,7 +98,7 @@ const data = fs.readFileSync(
 
 
 const missing = NEEDED.filter(
-    name => !data.includes(name)
+    item => !content.includes(item)
 );
 
 
@@ -107,15 +121,16 @@ console.log(
 
 if (missing.length > 0) {
 
+
     console.error(
-        "\n❌ OpenCV.js缺少以下API:"
+        "\n❌ OpenCV.js 缺少 PaddleOCR 必需 API:"
     );
 
 
     missing.forEach(
-        name =>
+        item =>
             console.error(
-                "  - " + name
+                " - " + item
             )
     );
 
@@ -127,5 +142,5 @@ if (missing.length > 0) {
 
 
 console.log(
-    "\n✅ PaddleOCR需要的OpenCV API全部存在"
+    "\n✅ OpenCV.js 满足 PaddleOCR 前端需求"
 );
