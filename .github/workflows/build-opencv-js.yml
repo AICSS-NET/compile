@@ -36,11 +36,24 @@ jobs:
       # 但 OpenCV modules/js/CMakeLists.txt 里写死了 add_definitions("-std=c++11")，
       # 这一行会覆盖掉通过 -DCMAKE_CXX_STANDARD=17 传的设置（后出现的 -std 参数
       # 优先级更高），必须直接把源码里这一行改掉，光传 cmake 参数是不够的。
-      - name: 修正 js 模块的 C++ 标准（embind 要求 C++17+）
+      #
+      # 另外，新版 Emscripten 移除/改名了几个老的链接参数：
+      #   - DEMANGLE_SUPPORT：整个移除了（"No longer supported"），直接删掉
+      #   - TOTAL_MEMORY → 改名成 INITIAL_MEMORY
+      #   - WASM_MEM_MAX  → 改名成 MAXIMUM_MEMORY
+      # 这三个都是 OpenCV 这份 CMakeLists.txt 写死的老参数名，新版工具链下要么
+      # 直接报错退出（DEMANGLE_SUPPORT 已经实测踩到了），要么改名后旧名字不再
+      # 生效，所以一并改掉，不逐个踩坑浪费构建时间。
+      - name: 修正 js 模块的 C++ 标准 + 替换新版 Emscripten 已废弃/改名的参数
         run: |
           sed -i 's/add_definitions("-std=c++11")/add_definitions("-std=c++17")/' \
             opencv/modules/js/CMakeLists.txt
-          grep -n "std=c++" opencv/modules/js/CMakeLists.txt
+          sed -i 's/ -s DEMANGLE_SUPPORT=1//' \
+            opencv/modules/js/CMakeLists.txt
+          sed -i 's/TOTAL_MEMORY/INITIAL_MEMORY/g; s/WASM_MEM_MAX/MAXIMUM_MEMORY/g' \
+            opencv/modules/js/CMakeLists.txt
+          grep -n "std=c++\|DEMANGLE_SUPPORT\|EXPORT_NAME\|INITIAL_MEMORY\|MAXIMUM_MEMORY" \
+            opencv/modules/js/CMakeLists.txt
 
       # 把完整输出重定向到日志文件，成功时只打印一个简短摘要，失败时只打印
       # 日志里 error 附近的上下文（而不是几千行的每文件编译命令），完整日志
