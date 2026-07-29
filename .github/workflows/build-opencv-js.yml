@@ -5,11 +5,6 @@ name: Build minimal opencv.js (core + imgproc only)
 #   2. push 到 main 分支时自动触发（如果不想每次 push 都编译，把下面 push 那几行删掉）
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "opencv_js_minimal.config.py"
-      - ".github/workflows/build-opencv-js.yml"
 
 jobs:
   build:
@@ -30,25 +25,64 @@ jobs:
           ./emsdk activate latest
 
       - name: 安装 cmake / ninja
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cmake ninja-build
 
       # 版本号要跟 npm 上 @techstark/opencv-js 用的版本对齐，
       # 保证生成的 API 跟现在项目里用的调用方式兼容。
       - name: 拉取 OpenCV 4.10.0 源码
         run: git clone --depth 1 --branch 4.10.0 https://github.com/opencv/opencv.git
 
+      # 新版 Emscripten 的 embind 头文件（bind.h/wire.h）要求 C++17 起步，
+      # 但 OpenCV modules/js/CMakeLists.txt 里写死了 add_definitions("-std=c++11")，
+      # 这一行会覆盖掉通过 -DCMAKE_CXX_STANDARD=17 传的设置（后出现的 -std 参数
+      # 优先级更高），必须直接把源码里这一行改掉，光传 cmake 参数是不够的。
+      - name: 修正 js 模块的 C++ 标准（embind 要求 C++17+）
+        run: |
+          sed -i 's/add_definitions("-std=c++11")/add_definitions("-std=c++17")/' \
+            opencv/modules/js/CMakeLists.txt
+          grep -n "std=c++" opencv/modules/js/CMakeLists.txt
+
+      # 把完整输出重定向到日志文件，成功时只打印一个简短摘要，失败时只打印
+      # 日志里 error 附近的上下文（而不是几千行的每文件编译命令），完整日志
+      # 始终会作为 artifact 上传，摘要看不出问题时可以下载完整版接着排查。
       - name: 编译精简版 opencv.js（只含 core + imgproc）
+        id: build
         run: |
           source emsdk/emsdk_env.sh
+          set +e
           python3 opencv/platforms/js/build_js.py build_output \
             --build_wasm \
             --disable_single_file \
             --config "$(pwd)/opencv_js_minimal.config.py" \
             --cmake_option="-DBUILD_LIST=core,imgproc,js" \
+            --cmake_option="-DCMAKE_CXX_STANDARD=17" \
+            --cmake_option="-DCMAKE_CXX_STANDARD_REQUIRED=ON" \
             --cmake_option="-DBUILD_TESTS=OFF" \
             --cmake_option="-DBUILD_PERF_TESTS=OFF" \
             --cmake_option="-DBUILD_EXAMPLES=OFF" \
-            --emscripten_dir="$(pwd)/emsdk/upstream/emscripten"
+            --emscripten_dir="$(pwd)/emsdk/upstream/emscripten" \
+            > build_full.log 2>&1
+          status=$?
+          if [ $status -ne 0 ]; then
+            echo "::error::编译失败（退出码 $status），下面只显示日志里 error 附近的内容："
+            echo "----------------------------------------------------------------"
+            grep -n -i -B2 -A6 "error" build_full.log | tail -400
+            echo "----------------------------------------------------------------"
+            echo "以上是摘要，看不出问题的话，去这次运行的 Artifacts 里下载完整日志 build-full-log。"
+            exit $status
+          else
+            echo "✅ 编译成功，日志摘要（最后 20 行）："
+            tail -20 build_full.log
+          fi
+
+      # 不管成功失败都上传完整日志，方便摘要看不出问题时深挖。
+      - name: 上传完整构建日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-full-log
+          path: build_full.log
+          retention-days: 14
 
       # 关键一步：编译成功不代表产物是对的（沙盒环境里就遇到过，老版本工具链下
       # 编译"成功"了，但一部分函数在最终产物里却是缺失的）。这里显式核对我们
