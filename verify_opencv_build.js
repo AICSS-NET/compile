@@ -1,154 +1,96 @@
 #!/usr/bin/env node
 
-
-const fs = require("fs");
-
+const fs=require("fs");
 
 
-const NEEDED = [
+const NEEDED=[
 
-    // functions
+"cvtColor",
 
-    "cvtColor",
+"resize",
 
-    "resize",
+"findContours",
 
-    "findContours",
+"minAreaRect",
 
-    "minAreaRect",
+"getPerspectiveTransform",
 
-    "getPerspectiveTransform",
+"warpPerspective",
 
-    "warpPerspective",
+"fillPoly",
 
-    "fillPoly",
+"rotate",
 
-    "rotate",
-
-    "mean",
+"mean",
 
 
-    // classes
+"Mat",
 
-    "Mat",
+"MatVector",
 
-    "MatVector",
+"RotatedRect",
 
-    "RotatedRect",
+"Rect",
 
-    "Rect",
+"Size",
 
-    "Size",
-
-    "Scalar",
-
-
-    // constants
-
-    "BORDER_REPLICATE",
-
-    "CHAIN_APPROX_SIMPLE",
-
-    "COLOR_GRAY2BGR",
-
-    "COLOR_RGBA2BGR",
-
-    "CV_8UC1",
-
-    "CV_32FC1",
-
-    "CV_32FC2",
-
-    "CV_32SC2",
-
-    "INTER_LINEAR",
-
-    "INTER_CUBIC",
-
-    "RETR_LIST",
-
-    "ROTATE_90_COUNTERCLOCKWISE",
+"Scalar",
 
 ];
 
 
-
-const filePath = process.argv[2];
-
-
-if (!filePath) {
-
-    console.error(
-        "Usage: node verify_opencv_build.js <opencv.js>"
-    );
-
-    process.exit(2);
-
-}
+const file=process.argv[2];
 
 
+if(!file){
 
-const data = fs.readFileSync(
+ console.error(
+ "node verify_opencv_build.js opencv.js"
+ );
 
-    filePath,
-
-    "utf8"
-
-);
-
-
-
-const missing = NEEDED.filter(
-
-    item => !data.includes(item)
-
-);
-
-
-
-console.log(
-    `检查文件: ${filePath}`
-);
-
-
-console.log(
-    `需要的函数/常量总数: ${NEEDED.length}`
-);
-
-
-console.log(
-    `缺失: ${missing.length}`
-);
-
-
-
-if (missing.length > 0) {
-
-
-    console.error(
-        "\n❌ OpenCV.js 不完整:"
-    );
-
-
-    missing.forEach(
-
-        item =>
-
-            console.error(
-                " - " + item
-            )
-
-    );
-
-
-    process.exit(1);
+ process.exit(2);
 
 }
 
 
+const data=fs.readFileSync(file,"utf8");
+
+
+const missing=NEEDED.filter(
+ x=>!data.includes(x)
+);
+
 
 console.log(
+`检查文件: ${file}`
+);
 
-    "\n✅ OpenCV.js 满足 PaddleOCR 前端需求"
 
+console.log(
+`需要: ${NEEDED.length}`
+);
+
+
+console.log(
+`缺失: ${missing.length}`
+);
+
+
+if(missing.length){
+
+ console.error(
+ "\n❌ missing:"
+ );
+
+ missing.forEach(
+ x=>console.error(x)
+ );
+
+ process.exit(1);
+
+}
+
+
+console.log(
+"\n✅ OpenCV.js OK"
 );
