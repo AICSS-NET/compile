@@ -1,0 +1,72 @@
+name: Build minimal opencv.js (core + imgproc only)
+
+# 触发方式：
+#   1. 手动点 "Run workflow" 按钮触发（推荐，按需构建）
+#   2. push 到 main 分支时自动触发（如果不想每次 push 都编译，把下面 push 那几行删掉）
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "opencv_js_minimal.config.py"
+      - ".github/workflows/build-opencv-js.yml"
+
+jobs:
+  build:
+    # GitHub 官方 runner：4 核 CPU / 16GB 内存，比沙盒环境的 1 核强很多，
+    # 编译这个精简过的 core+imgproc 子集，正常情况下十几分钟内能跑完。
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库（拿到白名单配置文件）
+        uses: actions/checkout@v4
+
+      # 官方 emsdk 安装器需要访问 storage.googleapis.com，
+      # GitHub Actions 的 runner 有完整公网访问权限，跟沙盒环境不一样，这一步能正常跑。
+      - name: 安装最新版 Emscripten 工具链
+        run: |
+          git clone https://github.com/emscripten-core/emsdk.git
+          cd emsdk
+          ./emsdk install latest
+          ./emsdk activate latest
+
+      - name: 安装 cmake / ninja
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
+      # 版本号要跟 npm 上 @techstark/opencv-js 用的版本对齐，
+      # 保证生成的 API 跟现在项目里用的调用方式兼容。
+      - name: 拉取 OpenCV 4.10.0 源码
+        run: git clone --depth 1 --branch 4.10.0 https://github.com/opencv/opencv.git
+
+      - name: 编译精简版 opencv.js（只含 core + imgproc）
+        run: |
+          source emsdk/emsdk_env.sh
+          python3 opencv/platforms/js/build_js.py build_output \
+            --build_wasm \
+            --disable_single_file \
+            --config "$(pwd)/opencv_js_minimal.config.py" \
+            --cmake_option="-DBUILD_LIST=core,imgproc,js" \
+            --cmake_option="-DBUILD_TESTS=OFF" \
+            --cmake_option="-DBUILD_PERF_TESTS=OFF" \
+            --cmake_option="-DBUILD_EXAMPLES=OFF" \
+            --emscripten_dir="$(pwd)/emsdk/upstream/emscripten"
+
+      # 关键一步：编译成功不代表产物是对的（沙盒环境里就遇到过，老版本工具链下
+      # 编译"成功"了，但一部分函数在最终产物里却是缺失的）。这里显式核对我们
+      # 实际用到的每一个函数/常量是不是真的都在产物里，少一个就让整个workflow
+      # 失败，不会让一个"看起来编译成功但实际缺东西"的半成品被当成正常产物下载走。
+      - name: 校验产物包含全部需要用到的函数（构建产物完整性门禁）
+        run: node verify_opencv_build.js build_output/bin/opencv.js
+
+      - name: 打包产物
+        run: |
+          mkdir -p dist
+          cp build_output/bin/opencv.js dist/
+          cp build_output/bin/opencv_js.wasm dist/
+          ls -la dist/
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencv-js-minimal
+          path: dist/
+          retention-days: 30
