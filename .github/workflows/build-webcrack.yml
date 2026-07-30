@@ -1,34 +1,62 @@
 name: Build slim webcrack
+
 on:
   workflow_dispatch:
+    inputs:
+      webcrack_version:
+        description: 'webcrack npm version (e.g. 2.16.0 or latest)'
+        required: false
+        default: 'latest'
+  push:
+    paths:
+      - 'scripts/build-webcrack.mjs'
+      - '.github/workflows/build-webcrack.yml'
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
 
-      - name: Clone & build browser bundle
+      - name: Install build deps
         run: |
-          git clone --depth 1 https://github.com/j4k0xb/webcrack.git
-          cd webcrack
-          pnpm install
-          # 用 esbuild 打 browser 目标，排除 Node 专用入口
-          npx esbuild packages/webcrack/src/index.ts \
-            --bundle \
-            --platform=browser \
-            --format=iife \
-            --global-name=webcrack \
-            --minify \
-            --outfile=../webcrack.min.js \
-            --external:isolated-vm \
-            --define:process.env.NODE_ENV=\"production\"
-          # 若官方已有 browser 构建脚本，优先用官方的再 minify
+          npm init -y
+          npm install esbuild webcrack@${{ github.event.inputs.webcrack_version || 'latest' }}
 
-      - uses: actions/upload-artifact@v4
+      - name: Build browser bundle
+        run: node scripts/build-webcrack.mjs
+
+      - name: Show size
+        run: |
+          ls -lh dist/webcrack.min.js
+          gzip -c dist/webcrack.min.js | wc -c | awk '{printf "gzip: %.1f KB\n", $1/1024}'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: webcrack-slim
-          path: webcrack.min.js
+          path: dist/webcrack.min.js
+          retention-days: 30
+
+      - name: Commit to dist branch (optional)
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin dist || true
+          git checkout -B dist
+          mkdir -p vendor
+          cp dist/webcrack.min.js vendor/webcrack.min.js
+          git add vendor/webcrack.min.js
+          git diff --staged --quiet || git commit -m "chore: update webcrack.min.js"
+          git push -f origin dist
