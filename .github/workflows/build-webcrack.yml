@@ -1,0 +1,34 @@
+name: Build slim webcrack
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Clone & build browser bundle
+        run: |
+          git clone --depth 1 https://github.com/j4k0xb/webcrack.git
+          cd webcrack
+          pnpm install
+          # 用 esbuild 打 browser 目标，排除 Node 专用入口
+          npx esbuild packages/webcrack/src/index.ts \
+            --bundle \
+            --platform=browser \
+            --format=iife \
+            --global-name=webcrack \
+            --minify \
+            --outfile=../webcrack.min.js \
+            --external:isolated-vm \
+            --define:process.env.NODE_ENV=\"production\"
+          # 若官方已有 browser 构建脚本，优先用官方的再 minify
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webcrack-slim
+          path: webcrack.min.js
