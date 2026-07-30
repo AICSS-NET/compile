@@ -1,87 +1,86 @@
 /**
  * 构建浏览器版 webcrack 精简包
- * 目标：保留 unminify / deobfuscate / unpack / jsx / mangle
- * 去掉：CLI、result.save（fs）、isolated-vm 等 Node 专用路径
  */
 import { build } from 'esbuild';
-import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+const mkdirAsync = promisify(mkdir);
+const writeFileAsync = promisify(writeFile);
+const readFileAsync = promisify(readFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const outDir = join(root, 'dist');
 const outFile = join(outDir, 'webcrack.min.js');
-
 const require = createRequire(import.meta.url);
 
-// 解析 webcrack 入口（优先用已安装的包）
-function resolveWebcrackEntry() {
-  try {
-    const pkgPath = require.resolve('webcrack/package.json');
-    const pkg = JSON.parse(awaitableRead(pkgPath));
-    // ESM 入口
-    if (pkg.exports?.['.']?.import) {
-      return join(dirname(pkgPath), pkg.exports['.'].import.default || pkg.exports['.'].import);
-    }
-    if (pkg.module) return join(dirname(pkgPath), pkg.module);
-    if (pkg.main) return join(dirname(pkgPath), pkg.main);
-  } catch {
-    // fallthrough
-  }
-  throw new Error('webcrack not found. Run: npm i webcrack');
-}
+function resolveEntry() {
+  const pkgPath = require.resolve('webcrack/package.json');
+  const dir = dirname(pkgPath);
+  const pkg = JSON.parse(require('fs').readFileSync(pkgPath, 'utf8'));
 
-function awaitableRead(p) {
-  // sync helper for resolve path only
-  return require('fs').readFileSync(p, 'utf8');
+  const candidates = [];
+  if (pkg.exports?.['.']) {
+    const exp = pkg.exports['.'];
+    if (typeof exp === 'string') candidates.push(join(dir, exp));
+    if (exp.import) {
+      if (typeof exp.import === 'string') candidates.push(join(dir, exp.import));
+      else if (exp.import.default) candidates.push(join(dir, exp.import.default));
+    }
+    if (exp.default) candidates.push(join(dir, exp.default));
+  }
+  if (pkg.module) candidates.push(join(dir, pkg.module));
+  if (pkg.main) candidates.push(join(dir, pkg.main));
+  candidates.push(join(dir, 'dist/index.js'));
+
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  throw new Error('找不到 webcrack 入口，candidates:\n' + candidates.join('\n'));
 }
 
 async function main() {
-  await mkdir(outDir, { recursive: true });
+  await mkdirAsync(outDir, { recursive: true });
 
-  const entry = (() => {
-    try {
-      const pkgPath = require.resolve('webcrack/package.json');
-      const pkg = JSON.parse(require('fs').readFileSync(pkgPath, 'utf8'));
-      const dir = dirname(pkgPath);
-      if (pkg.exports?.['.']?.import?.default) return join(dir, pkg.exports['.'].import.default);
-      if (typeof pkg.exports?.['.']?.import === 'string') return join(dir, pkg.exports['.'].import);
-      if (pkg.module) return join(dir, pkg.module);
-      return join(dir, pkg.main || 'dist/index.js');
-    } catch (e) {
-      throw new Error('请先安装 webcrack: npm i webcrack@latest\n' + e.message);
-    }
-  })();
-
+  const entry = resolveEntry();
   console.log('entry:', entry);
 
-  // 浏览器 stub：拦截 Node 专用模块，避免打进 fs / isolated-vm
-  const stubFs = `
-    export const readFile = async () => { throw new Error('fs not available in browser'); };
-    export const writeFile = async () => { throw new Error('fs not available in browser'); };
-    export const mkdir = async () => { throw new Error('fs not available in browser'); };
-    export default { readFile, writeFile, mkdir };
-  `;
-  const stubPath = `
-    export const join = (...a) => a.filter(Boolean).join('/').replace(/\\/+/g, '/');
-    export const dirname = (p) => p.replace(/\\/?[^/]+\\/?$/, '') || '.';
-    export const relative = (from, to) => to;
-    export const normalize = (p) => p.replace(/\\/+/g, '/');
-    export default { join, dirname, relative, normalize };
-  `;
-  const stubIsolatedVm = `
-    export default class Isolate {
-      constructor() { throw new Error('isolated-vm is not available in browser'); }
-    }
-  `;
-
   const stubDir = join(outDir, '.stubs');
-  await mkdir(stubDir, { recursive: true });
-  await writeFile(join(stubDir, 'fs-promises.js'), stubFs);
-  await writeFile(join(stubDir, 'path.js'), stubPath);
-  await writeFile(join(stubDir, 'isolated-vm.js'), stubIsolatedVm);
+  await mkdirAsync(stubDir, { recursive: true });
+
+  await writeFileAsync(
+    join(stubDir, 'fs-promises.js'),
+    `
+export const readFile = async () => { throw new Error('fs not available in browser'); };
+export const writeFile = async () => { throw new Error('fs not available in browser'); };
+export const mkdir = async () => { throw new Error('fs not available in browser'); };
+export default { readFile, writeFile, mkdir };
+`
+  );
+
+  await writeFileAsync(
+    join(stubDir, 'path.js'),
+    `
+export const join = (...a) => a.filter(Boolean).join('/').replace(/\\/+/g, '/');
+export const dirname = (p) => String(p).replace(/\\/?[^/]+\\/?$/, '') || '.';
+export const relative = (from, to) => to;
+export const normalize = (p) => String(p).replace(/\\/+/g, '/');
+export default { join, dirname, relative, normalize };
+`
+  );
+
+  await writeFileAsync(
+    join(stubDir, 'isolated-vm.js'),
+    `
+export default class Isolate {
+  constructor() { throw new Error('isolated-vm is not available in browser'); }
+}
+`
+  );
 
   await build({
     entryPoints: [entry],
@@ -93,8 +92,6 @@ async function main() {
     platform: 'browser',
     target: ['es2020'],
     logLevel: 'info',
-    // 不把 Node 内建打进去
-    external: [],
     alias: {
       'node:fs/promises': join(stubDir, 'fs-promises.js'),
       'fs/promises': join(stubDir, 'fs-promises.js'),
@@ -109,26 +106,25 @@ async function main() {
       'process.browser': 'true',
     },
     banner: {
-      js: '/* webcrack browser slim build — unminify/deobfuscate/unpack/jsx/mangle */',
+      js: '/* webcrack browser slim — unminify/deobfuscate/unpack/jsx/mangle */',
     },
     footer: {
-      // 兼容你页面里的全局 webcrack(...)
       js: `
-;typeof WebcrackBundle !== 'undefined' && (function () {
-  var api = WebcrackBundle.webcrack || WebcrackBundle.default || WebcrackBundle;
+;(function () {
+  var b = typeof WebcrackBundle !== 'undefined' ? WebcrackBundle : null;
+  if (!b) return;
+  var api = b.webcrack || b.default || b;
+  if (api && typeof api.webcrack === 'function') api = api.webcrack;
   if (typeof api === 'function') {
-    self.webcrack = api;
+    if (typeof self !== 'undefined') self.webcrack = api;
     if (typeof window !== 'undefined') window.webcrack = api;
-  } else if (api && typeof api.webcrack === 'function') {
-    self.webcrack = api.webcrack;
-    if (typeof window !== 'undefined') window.webcrack = api.webcrack;
   }
 })();
 `,
     },
   });
 
-  const buf = await readFile(outFile);
+  const buf = await readFileAsync(outFile);
   console.log('built:', outFile, '(' + (buf.length / 1024).toFixed(1) + ' KB)');
 }
 
