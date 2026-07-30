@@ -1,0 +1,130 @@
+name: Build reduced-ops onnxruntime-web wasm (PP-OCRv6 tiny+small only)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # onnxruntime 源码规模、build.py 涉及的编译量都比 opencv 大不少，
+    # 单次构建可能要 40 分钟以上，GitHub 默认 job 超时是 6 小时，够用，
+    # 但手动触发后不要太快就以为卡住了。
+    timeout-minutes: 180
+    steps:
+      - name: 检出仓库（拿到算子清单相关脚本，如果有的话）
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 依赖（生成算子清单需要）
+        run: pip install onnx
+
+      # 这 4 个模型文件的地址，是从 paddleocr-js@0.4.2 的源码里反编译出来的，
+      # 跟 ocr-app.js 里 CONFIG.modelPresets 配的 tiny/small 两套模型完全对应。
+      # 只分析其中一个模型会漏掉另一个模型需要的算子，切换模型档位时会直接报错，
+      # 所以 4 个都要下载、都要喂给下面的算子扫描脚本，取"并集"。
+      - name: 下载 PP-OCRv6 tiny/small 检测+识别模型
+        run: |
+          mkdir -p models
+          cd models
+          urls=(
+            "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_det_onnx_infer.tar"
+            "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_rec_onnx_infer.tar"
+            "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_det_onnx_infer.tar"
+            "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_onnx_infer.tar"
+          )
+          for u in "${urls[@]}"; do
+            echo "下载: $u"
+            curl -fsSL -O "$u"
+          done
+          for f in *.tar; do tar -xf "$f"; done
+          echo "解压出的 .onnx 文件："
+          find . -name "*.onnx"
+
+      # 版本要跟 npm 上 onnxruntime-web 用的版本对齐（ocr-app.js 现在用的是
+      # onnxruntime-web@1.22.0），保证下面"只替换底层 wasm/mjs、不改上层
+      # ort.wasm.min.mjs"这个策略里，两边是同一个版本的产物，接口对得上。
+      - name: 拉取 onnxruntime v1.22.0 源码
+        run: git clone --depth 1 --branch v1.22.0 https://github.com/microsoft/onnxruntime.git onnxruntime-src
+
+      # 用官方脚本扫描 4 个模型文件，生成"实际用到哪些算子"的精简配置清单。
+      - name: 生成算子精简清单
+        run: |
+          python3 onnxruntime-src/tools/python/create_reduced_build_config.py \
+            --format ONNX \
+            models \
+            ops_config.txt
+          echo "生成的算子清单："
+          cat ops_config.txt
+
+      - name: 安装最新版 Emscripten 工具链
+        run: |
+          git clone https://github.com/emscripten-core/emsdk.git
+          cd emsdk
+          ./emsdk install latest
+          ./emsdk activate latest
+
+      # 官方文档给出的构建 ort-wasm-simd-threaded.wasm/.mjs 这一对文件的标准命令
+      # （https://onnxruntime.ai/docs/build/web.html），在此基础上加
+      # --include_ops_by_config 做算子精简。不加 --minimal_build，保持能直接
+      # 加载标准 .onnx 文件（paddleocr-js 就是这么用的），不需要转换成 .ort 格式。
+      - name: 编译精简算子版 onnxruntime-web wasm
+        id: build
+        run: |
+          source emsdk/emsdk_env.sh
+          set +e
+          cd onnxruntime-src
+          ./build.sh \
+            --config MinSizeRel \
+            --build_wasm \
+            --enable_wasm_simd \
+            --enable_wasm_threads \
+            --skip_tests \
+            --disable_wasm_exception_catching \
+            --disable_rtti \
+            --parallel \
+            --include_ops_by_config "$(pwd)/../ops_config.txt" \
+            --enable_reduced_operator_type_support \
+            --allow_running_as_root \
+            > ../build_full.log 2>&1
+          status=$?
+          cd ..
+          if [ $status -ne 0 ]; then
+            echo "::error::编译失败（退出码 $status），下面只显示日志里 error 附近的内容："
+            echo "----------------------------------------------------------------"
+            grep -n -i -B2 -A6 "error" build_full.log | tail -400
+            echo "----------------------------------------------------------------"
+            echo "以上是摘要，看不出问题的话，去这次运行的 Artifacts 里下载完整日志 build-full-log。"
+            exit $status
+          else
+            echo "✅ 编译成功，日志摘要（最后 20 行）："
+            tail -20 build_full.log
+          fi
+
+      - name: 上传完整构建日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-full-log
+          path: build_full.log
+          retention-days: 14
+
+      - name: 定位产物文件
+        run: |
+          find onnxruntime-src/build -name "ort-wasm-simd-threaded.wasm" -o -name "ort-wasm-simd-threaded.mjs"
+          mkdir -p dist
+          find onnxruntime-src/build -name "ort-wasm-simd-threaded.wasm" -exec cp {} dist/ \;
+          find onnxruntime-src/build -name "ort-wasm-simd-threaded.mjs" -exec cp {} dist/ \;
+          ls -la dist/
+
+      # 关键校验：不只是查字符串在不在（之前 opencv 那次已经证明这种查法不可靠），
+      - name: 安装 Node 依赖
+        run: npm install onnxruntime-web@1.22.0
+
+      - name: 真实推理校验（用新编译的 wasm 加载真实模型跑一次）
+        run: node ort/verify_ort_build.js dist models
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: onnxruntime-web-reduced-ops
+          path: dist/
+          retention-days: 30
