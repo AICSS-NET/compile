@@ -1,11 +1,6 @@
 /**
  * javascript-obfuscator 浏览器包
  * 基于官方 browser 入口再 minify
- * 你页面实际使用的 options：
- *   compact, controlFlowFlattening, deadCodeInjection,
- *   stringArray/Encoding/Threshold, renameGlobals,
- *   identifierNamesGenerator, target
- * （官方包无法按 option 删除 transformer，只能整包压缩）
  */
 import { build } from 'esbuild';
 import { mkdirSync, readFileSync, existsSync } from 'node:fs';
