@@ -5,11 +5,6 @@ name: Build minimal opencv.js (core + imgproc only)
 #   2. push 到 main 分支时自动触发（如果不想每次 push 都编译，把下面 push 那几行删掉）
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "opencv/opencv_js_minimal.config.py"
-      - ".github/workflows/build-opencv-js.yml"
 
 jobs:
   build:
