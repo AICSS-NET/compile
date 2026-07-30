@@ -26,7 +26,7 @@ jobs:
       - name: Install deps
         run: |
           npm init -y
-          npm install esbuild webcrack@${{ github.event.inputs.webcrack_version || 'latest' }}
+          npm install esbuild webcrack@${{ github.event.inputs.webcrack_version || 'latest' }} assert util path-browserify
 
       - name: Build
         run: node scripts/build-webcrack.mjs
