@@ -29,8 +29,14 @@ jobs:
 
       # 版本号要跟 npm 上 @techstark/opencv-js 用的版本对齐，
       # 保证生成的 API 跟现在项目里用的调用方式兼容。
+      #
+      # 显式指定克隆目标目录名为 opencv-src（而不是让 git 用默认的仓库名
+      # "opencv"）——因为这个仓库里已经有一个 opencv/ 文件夹放配置文件
+      # （opencv_js_minimal.config.py、verify_opencv_build.js），如果克隆
+      # 源码也用默认的 "opencv" 目录名，会跟这个文件夹撞名，git clone
+      # 直接报错退出（实测踩到过：'destination path opencv already exists'）。
       - name: 拉取 OpenCV 4.10.0 源码
-        run: git clone --depth 1 --branch 4.10.0 https://github.com/opencv/opencv.git
+        run: git clone --depth 1 --branch 4.10.0 https://github.com/opencv/opencv.git opencv-src
 
       # 新版 Emscripten 的 embind 头文件（bind.h/wire.h）要求 C++17 起步，
       # 但 OpenCV modules/js/CMakeLists.txt 里写死了 add_definitions("-std=c++11")，
@@ -47,13 +53,13 @@ jobs:
       - name: 修正 js 模块的 C++ 标准 + 替换新版 Emscripten 已废弃/改名的参数
         run: |
           sed -i 's/add_definitions("-std=c++11")/add_definitions("-std=c++17")/' \
-            opencv/modules/js/CMakeLists.txt
+            opencv-src/modules/js/CMakeLists.txt
           sed -i 's/ -s DEMANGLE_SUPPORT=1//' \
-            opencv/modules/js/CMakeLists.txt
+            opencv-src/modules/js/CMakeLists.txt
           sed -i 's/TOTAL_MEMORY/INITIAL_MEMORY/g; s/WASM_MEM_MAX/MAXIMUM_MEMORY/g' \
-            opencv/modules/js/CMakeLists.txt
+            opencv-src/modules/js/CMakeLists.txt
           grep -n "std=c++\|DEMANGLE_SUPPORT\|EXPORT_NAME\|INITIAL_MEMORY\|MAXIMUM_MEMORY" \
-            opencv/modules/js/CMakeLists.txt
+            opencv-src/modules/js/CMakeLists.txt
 
       # 把完整输出重定向到日志文件，成功时只打印一个简短摘要，失败时只打印
       # 日志里 error 附近的上下文（而不是几千行的每文件编译命令），完整日志
@@ -63,7 +69,7 @@ jobs:
         run: |
           source emsdk/emsdk_env.sh
           set +e
-          python3 opencv/platforms/js/build_js.py build_output \
+          python3 opencv-src/platforms/js/build_js.py build_output \
             --build_wasm \
             --config "$(pwd)/opencv/opencv_js_minimal.config.py" \
             --cmake_option="-DBUILD_LIST=core,imgproc,js" \
