@@ -1,5 +1,7 @@
 /**
- * 构建浏览器版 webcrack 精简包
+ * webcrack 浏览器精简包
+ * 保留：unminify / deobfuscate / unpack / jsx / mangle
+ * 去掉运行时依赖：save 写盘、CLI、isolated-vm（stub）
  */
 import { build } from 'esbuild';
 import {
@@ -18,15 +20,15 @@ const outDir = join(root, 'dist');
 const outFile = join(outDir, 'webcrack.min.js');
 const require = createRequire(import.meta.url);
 
-function getPkgDir() {
+function getPkgDir(name) {
   try {
-    const mainPath = require.resolve('webcrack');
+    const mainPath = require.resolve(name);
     let dir = dirname(mainPath);
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 8; i++) {
       const pkgFile = join(dir, 'package.json');
       if (existsSync(pkgFile)) {
         const pkg = JSON.parse(readFileSync(pkgFile, 'utf8'));
-        if (pkg.name === 'webcrack') return dir;
+        if (pkg.name === name) return dir;
       }
       const parent = dirname(dir);
       if (parent === dir) break;
@@ -35,27 +37,23 @@ function getPkgDir() {
   } catch {
     // ignore
   }
-  const fallback = join(root, 'node_modules', 'webcrack');
+  const fallback = join(root, 'node_modules', name);
   if (existsSync(join(fallback, 'package.json'))) return fallback;
-  throw new Error('找不到 webcrack，请先: npm install webcrack');
+  throw new Error(`找不到 ${name}，请先 npm install ${name}`);
 }
 
 function resolveEntry(pkgDir) {
   const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
   const candidates = [];
 
-  if (pkg.exports && pkg.exports['.']) {
+  if (pkg.exports?.['.']) {
     const exp = pkg.exports['.'];
     if (typeof exp === 'string') candidates.push(join(pkgDir, exp));
     if (exp && typeof exp === 'object') {
       if (typeof exp.import === 'string') candidates.push(join(pkgDir, exp.import));
-      if (exp.import && typeof exp.import === 'object' && exp.import.default) {
-        candidates.push(join(pkgDir, exp.import.default));
-      }
+      if (exp.import?.default) candidates.push(join(pkgDir, exp.import.default));
       if (typeof exp.require === 'string') candidates.push(join(pkgDir, exp.require));
-      if (exp.require && typeof exp.require === 'object' && exp.require.default) {
-        candidates.push(join(pkgDir, exp.require.default));
-      }
+      if (exp.require?.default) candidates.push(join(pkgDir, exp.require.default));
       if (typeof exp.default === 'string') candidates.push(join(pkgDir, exp.default));
     }
   }
@@ -73,7 +71,6 @@ function resolveEntry(pkgDir) {
   throw new Error('找不到 webcrack 入口:\n' + candidates.join('\n'));
 }
 
-/** 解析 npm 包路径；失败则返回 stub 路径 */
 function resolvePolyfill(name, stubPath) {
   try {
     return require.resolve(name);
@@ -86,25 +83,16 @@ function resolvePolyfill(name, stubPath) {
   }
 }
 
-function main() {
-  mkdirSync(outDir, { recursive: true });
-
-  const pkgDir = getPkgDir();
-  const entry = resolveEntry(pkgDir);
-  console.log('pkgDir:', pkgDir);
-  console.log('entry:', entry);
-
-  const stubDir = join(outDir, '.stubs');
+function writeStubs(stubDir) {
   mkdirSync(stubDir, { recursive: true });
 
-  // ---- stubs（polyfill 包不存在时兜底）----
   writeFileSync(
     join(stubDir, 'assert.js'),
     `
 function ok(v, msg) { if (!v) throw new Error(msg || 'assertion failed'); }
 function equal(a, b, msg) { if (a != b) throw new Error(msg || 'not equal'); }
 function strictEqual(a, b, msg) { if (a !== b) throw new Error(msg || 'not strict equal'); }
-function deepEqual() { /* no-op soft */ }
+function deepEqual() {}
 const api = { ok, equal, strictEqual, deepEqual, assert: ok };
 api.strict = api;
 export default api;
@@ -141,7 +129,9 @@ export default { join, dirname, relative, normalize, basename, extname, isAbsolu
     join(stubDir, 'util.js'),
     `
 export function inherit(c, p) {
-  c.prototype = Object.create(p.prototype, { constructor: { value: c, writable: true, configurable: true } });
+  c.prototype = Object.create(p.prototype, {
+    constructor: { value: c, writable: true, configurable: true },
+  });
 }
 export function format(f, ...args) {
   let i = 0;
@@ -151,12 +141,15 @@ export function format(f, ...args) {
     const a = args[i++];
     if (x === '%s') return String(a);
     if (x === '%d') return Number(a);
-    if (x === '%j') try { return JSON.stringify(a); } catch { return '[Circular]'; }
+    if (x === '%j') { try { return JSON.stringify(a); } catch { return '[Circular]'; } }
     return x;
   });
 }
 export function inspect(v) { try { return JSON.stringify(v); } catch { return String(v); } }
-export const types = { isDate: (v) => v instanceof Date, isRegExp: (v) => v instanceof RegExp };
+export const types = {
+  isDate: (v) => v instanceof Date,
+  isRegExp: (v) => v instanceof RegExp,
+};
 export default { inherit, format, inspect, types };
 `
   );
@@ -185,22 +178,36 @@ export default process;
     join(stubDir, 'isolated-vm.js'),
     `
 export default class Isolate {
-  constructor() { throw new Error('isolated-vm is not available in browser'); }
+  constructor() {
+    throw new Error('isolated-vm is not available in browser');
+  }
 }
 `
   );
+}
+
+async function main() {
+  mkdirSync(outDir, { recursive: true });
+
+  const pkgDir = getPkgDir('webcrack');
+  const entry = resolveEntry(pkgDir);
+  console.log('pkgDir:', pkgDir);
+  console.log('entry:', entry);
+
+  const stubDir = join(outDir, '.stubs-webcrack');
+  writeStubs(stubDir);
+
+  let pathPath = join(stubDir, 'path.js');
+  try {
+    pathPath = require.resolve('path-browserify');
+  } catch {
+    // stub
+  }
 
   const assertPath = resolvePolyfill('assert/', join(stubDir, 'assert.js'));
   const utilPath = resolvePolyfill('util/', join(stubDir, 'util.js'));
-  // path-browserify 优先，否则用 stub
-  let pathPath = join(stubDir, 'path.js');
-  try { pathPath = require.resolve('path-browserify'); } catch { /* stub */ }
 
-  console.log('assert:', assertPath);
-  console.log('util:', utilPath);
-  console.log('path:', pathPath);
-
-  return build({
+  await build({
     entryPoints: [entry],
     outfile: outFile,
     bundle: true,
@@ -233,7 +240,7 @@ export default class Isolate {
       global: 'globalThis',
     },
     banner: {
-      js: '/* webcrack browser slim — unminify/deobfuscate/unpack/jsx/mangle */',
+      js: '/* webcrack browser — unminify/deobfuscate/unpack/jsx/mangle (no save/cli) */',
     },
     footer: {
       js: `
@@ -249,10 +256,10 @@ export default class Isolate {
 })();
 `,
     },
-  }).then(() => {
-    const buf = readFileSync(outFile);
-    console.log('built:', outFile, '(' + (buf.length / 1024).toFixed(1) + ' KB)');
   });
+
+  const buf = readFileSync(outFile);
+  console.log('built:', outFile, '(' + (buf.length / 1024).toFixed(1) + ' KB)');
 }
 
 main().catch((e) => {
