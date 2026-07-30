@@ -1,5 +1,25 @@
 name: Build reduced-ops onnxruntime-web wasm (PP-OCRv6 tiny+small only)
 
+# 跟 opencv 那个 workflow 是同一套思路，但机制不同：onnxruntime 不是按"模块"分的，
+# 是按"算子"（Conv/MatMul/Softmax 这些神经网络计算单元）分的。这个 workflow 会：
+#   1. 下载 ocr-app.js 里实际配置的 4 个模型文件（tiny/small 各自的检测+识别模型）
+#   2. 用官方脚本扫描这 4 个模型，生成一份"这些模型实际用到哪些算子"的清单
+#   3. 用这份清单编译 onnxruntime，只把用到的算子编译进去，其余全部裁掉
+#   4. 产出跟官方 ort-wasm-simd-threaded.mjs / .wasm 同名的两个文件，直接替换
+#      vendor 目录里的这两个文件即可（不需要改 ort.wasm.min.mjs，那个官方 JS
+#      包装层不用换，见下面校验步骤的说明）。
+#
+# 重要提醒：这个比 opencv 那次更容易踩坑，两个已知风险点：
+#   - PP-OCR 这类移动端模型经常用量化算子，官方有过 "精简算子 + WASM" 组合下
+#     量化算子报错的真实案例（DynamicQuantizeMatMul 相关），不能保证一定不踩到。
+#   - 官方文档明确警告："JS 代码包和 WASM 二进制文件必须来自同一次构建，否则
+#     会因为压缩后的函数名对不上而初始化失败"——这里用的策略是只替换底层的
+#     ort-wasm-simd-threaded.mjs/.wasm 这一对（本来就是同一次构建产出的），
+#     上层官方 ort.wasm.min.mjs 保持不动，两者之间通过一套稳定的 C 语言接口
+#     （OrtCreateSession/OrtRun 这些）通信，理论上不受"内部算子精简"影响，
+#     但这是理论推导，不是100%实测验证过的官方保证，所以下面专门加了一步
+#     "真实推理测试"（不只是查字符串在不在，是真的拿模型跑一次推理），
+#     跑不通就直接让 workflow 失败，不会让有问题的产物流出来。
 on:
   workflow_dispatch:
 
@@ -14,8 +34,16 @@ jobs:
       - name: 检出仓库（拿到算子清单相关脚本，如果有的话）
         uses: actions/checkout@v4
 
-      - name: 安装 Python 依赖（生成算子清单需要）
-        run: pip install onnx
+      # onnx：生成算子清单的脚本要用。
+      # flatbuffers：build.py 内部做算子精简（--include_ops_by_config）时要
+      # 用到 tools/python/util/reduced_build_config_parser.py 里的
+      # parse_config 函数，而这个函数是否会被导出，取决于 flatbuffers 这个
+      # 包装没装——onnxruntime 自己的 util/__init__.py 里这段导入是包在
+      # try/except ImportError 里的，装不上就静默跳过、不导出 parse_config，
+      # 后面用到的地方才报"找不到"，报错信息本身看不出是缺了这个包，
+      # 是去翻 onnxruntime 源码才查到的（不装这个包，实测会直接编译失败）。
+      - name: 安装 Python 依赖（生成算子清单、算子精简编译都需要）
+        run: pip install onnx flatbuffers
 
       # 这 4 个模型文件的地址，是从 paddleocr-js@0.4.2 的源码里反编译出来的，
       # 跟 ocr-app.js 里 CONFIG.modelPresets 配的 tiny/small 两套模型完全对应。
@@ -116,7 +144,11 @@ jobs:
           ls -la dist/
 
       # 关键校验：不只是查字符串在不在（之前 opencv 那次已经证明这种查法不可靠），
-      - name: 安装 Node 依赖
+      # 而是真的用官方 ort.wasm.min.mjs（跟 index.html 里 importmap 用的完全
+      # 同一个版本，从 npm 现拉）配上我们新编译出来的 wasm，实际去加载一个真实
+      # 的 PP-OCRv6 模型、跑一次推理，跑通了才说明这套"只换底层 wasm、不换上层
+      # JS 包装"的策略是真的可行，不是理论上说得通而已。
+      - name: 安装 Node 依赖（用于真实推理校验）
         run: npm install onnxruntime-web@1.22.0
 
       - name: 真实推理校验（用新编译的 wasm 加载真实模型跑一次）
