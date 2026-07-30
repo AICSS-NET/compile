@@ -1,0 +1,46 @@
+name: Build slim javascript-obfuscator
+
+on:
+  workflow_dispatch:
+    inputs:
+      obfuscator_version:
+        description: 'javascript-obfuscator version (e.g. 5.4.3 or latest)'
+        required: false
+        default: '5.4.3'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install deps
+        run: |
+          npm init -y
+          npm install \
+            esbuild \
+            javascript-obfuscator@${{ github.event.inputs.obfuscator_version || '5.4.3' }}
+
+      - name: Build
+        run: node scripts/build-obfuscator.mjs
+
+      - name: Show size
+        run: |
+          ls -lh dist/javascript-obfuscator.min.js
+          gzip -c dist/javascript-obfuscator.min.js | wc -c | awk '{printf "gzip: %.1f KB\n", $1/1024}'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obfuscator-slim
+          path: dist/javascript-obfuscator.min.js
+          retention-days: 30
