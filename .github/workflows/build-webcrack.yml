@@ -4,13 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       webcrack_version:
-        description: 'webcrack npm version (e.g. 2.16.0 or latest)'
+        description: 'webcrack version (e.g. 2.16.0 or latest)'
         required: false
         default: 'latest'
-  push:
-    paths:
-      - 'scripts/build-webcrack.mjs'
-      - '.github/workflows/build-webcrack.yml'
 
 permissions:
   contents: write
@@ -25,15 +21,14 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
-          cache: 'npm'
+          node-version: '24'
 
-      - name: Install build deps
+      - name: Install deps
         run: |
           npm init -y
           npm install esbuild webcrack@${{ github.event.inputs.webcrack_version || 'latest' }}
 
-      - name: Build browser bundle
+      - name: Build
         run: node scripts/build-webcrack.mjs
 
       - name: Show size
@@ -47,16 +42,3 @@ jobs:
           name: webcrack-slim
           path: dist/webcrack.min.js
           retention-days: 30
-
-      - name: Commit to dist branch (optional)
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin dist || true
-          git checkout -B dist
-          mkdir -p vendor
-          cp dist/webcrack.min.js vendor/webcrack.min.js
-          git add vendor/webcrack.min.js
-          git diff --staged --quiet || git commit -m "chore: update webcrack.min.js"
-          git push -f origin dist
