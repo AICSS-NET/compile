@@ -5,6 +5,11 @@ name: Build minimal opencv.js (core + imgproc only)
 #   2. push 到 main 分支时自动触发（如果不想每次 push 都编译，把下面 push 那几行删掉）
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "opencv/opencv_js_minimal.config.py"
+      - ".github/workflows/build-opencv-js.yml"
 
 jobs:
   build:
@@ -65,8 +70,7 @@ jobs:
           set +e
           python3 opencv/platforms/js/build_js.py build_output \
             --build_wasm \
-            --disable_single_file \
-            --config "$(pwd)/opencv_js_minimal.config.py" \
+            --config "$(pwd)/opencv/opencv_js_minimal.config.py" \
             --cmake_option="-DBUILD_LIST=core,imgproc,js" \
             --cmake_option="-DCMAKE_CXX_STANDARD=17" \
             --cmake_option="-DCMAKE_CXX_STANDARD_REQUIRED=ON" \
@@ -100,19 +104,18 @@ jobs:
       # 校验产物是否完整：核对我们实际用到的每一个函数/常量是不是真的都在
       # 产物里，少一个就让整个 workflow 失败，不会让"看起来编译成功但实际缺
       # 东西"的半成品被当成正常产物下载走。
-      # 注意：这里要同时传 opencv.js 和 opencv_js.wasm 两个文件——因为构建用了
-      # --disable_single_file，embind 的函数/常量"名字"这些字符串实际存放在
-      # .wasm 二进制的数据段里（JS 侧胶水代码在 Module 初始化时读取这些名字，
-      # 动态构造出 Module.findContours 这些属性），不在 .js 文本文件里，只传
-      # .js 会产生大量假阳性的"缺失"（这是脚本第一版的真实 bug，已经改掉）。
+      # 单文件模式下，wasm 二进制是以 data URI（"data:application/octet-stream;
+      # base64,...."）的形式整个塞进 opencv.js 里的，embind 的函数/常量名字
+      # 这些字符串在 base64 编码之后不会再以可读文本形式出现——校验脚本内部
+      # 会自动识别这种情况，把 base64 部分解码回原始二进制再搜索，不用额外
+      # 传参数区分。
       - name: 校验产物包含全部需要用到的函数（构建产物完整性门禁）
-        run: node verify_opencv_build.js build_output/bin/opencv.js build_output/bin/opencv_js.wasm
+        run: node opencv/verify_opencv_build.js build_output/bin/opencv.js
 
       - name: 打包产物
         run: |
           mkdir -p dist
           cp build_output/bin/opencv.js dist/
-          cp build_output/bin/opencv_js.wasm dist/
           ls -la dist/
 
       - name: 上传构建产物
