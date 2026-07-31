@@ -45,61 +45,90 @@ jobs:
         run: |
           INPUT="${{ github.event.inputs.countries }}"
           CC="${{ matrix.country }}"
-          if [ -z "$INPUT" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ -z "$INPUT" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "$INPUT" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:lower:]' '[:upper:]' \
-            | grep -qx "$CC" && echo "run=true" >> "$GITHUB_OUTPUT" || echo "run=false" >> "$GITHUB_OUTPUT"
+            | grep -qx "$CC" \
+            && echo "run=true" >> "$GITHUB_OUTPUT" \
+            || echo "run=false" >> "$GITHUB_OUTPUT"
 
-      - if: steps.gate.outputs.run == 'true'
+      - name: Checkout self (export script)
+        if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
           path: self
 
-      - if: steps.gate.outputs.run == 'true'
+      - name: Checkout daimon3332/address
+        if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
           repository: daimon3332/address
           ref: main
           path: address
 
-      - if: steps.gate.outputs.run == 'true'
+      - name: Setup Node.js
+        if: steps.gate.outputs.run == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: address/package-lock.json
 
-      - if: steps.gate.outputs.run == 'true'
+      - name: Setup Python
+        if: steps.gate.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - if: steps.gate.outputs.run == 'true'
-        name: Install
+      - name: Install deps
+        if: steps.gate.outputs.run == 'true'
         working-directory: address
         run: |
-          sudo apt-get update && sudo apt-get install -y xz-utils
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            xz-utils build-essential cmake \
+            libexpat1-dev zlib1g-dev libbz2-dev
+
           npm ci
+
           python3 -m venv .venv
-          [ -f requirements.txt ] && .venv/bin/pip install -r requirements.txt || true
-          [ -f server/sync/requirements.txt ] && .venv/bin/pip install -r server/sync/requirements.txt || true
+          .venv/bin/pip install --upgrade pip
+          # 官方依赖：duckdb（Overture）+ osmium（Geofabrik）
+          .venv/bin/pip install -r server/sync/requirements.txt
+          .venv/bin/python -c "import duckdb, osmium; print('python-ok', duckdb.__version__)"
+
           cp .env.example .env
-          echo "ADDRESS_DATABASE_PATH=${ADDRESS_DATABASE_PATH}" >> .env
-          echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false" >> .env
-          echo "GOOGLE_TRANSLATION_ENABLED=false" >> .env
+          {
+            echo "ADDRESS_DATABASE_PATH=${ADDRESS_DATABASE_PATH}"
+            echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false"
+            echo "GOOGLE_TRANSLATION_ENABLED=false"
+          } >> .env
           mkdir -p data
           npm run db:migrate
 
-      - if: steps.gate.outputs.run == 'true'
-        name: Sync
+      - name: Sync country
+        if: steps.gate.outputs.run == 'true'
         working-directory: address
         env:
-          PATH: ${{ github.workspace }}/address/.venv/bin:/usr/bin:/bin
-        run: node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard "${{ matrix.country }}"
-
-      - if: steps.gate.outputs.run == 'true'
-        name: Export
-        working-directory: address
+          # 必须让 child_process spawn 的 python3 指向 venv
+          PATH: ${{ github.workspace }}/address/.venv/bin:/usr/local/bin:/usr/bin:/bin
+          ADDRESS_DATABASE_PATH: ${{ env.ADDRESS_DATABASE_PATH }}
         run: |
+          set -euo pipefail
+          echo "python3=$(which python3)"
+          python3 -c "import duckdb, osmium; print('sync-python-ok', duckdb.__version__)"
+          node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard "${{ matrix.country }}"
+
+      - name: Export streets
+        if: steps.gate.outputs.run == 'true'
+        working-directory: address
+        env:
+          ADDRESS_DATABASE_PATH: ${{ env.ADDRESS_DATABASE_PATH }}
+        run: |
+          set -euo pipefail
           mkdir -p scripts
           cp ../self/scripts/export-offline-streets.mjs scripts/export-offline-streets.mjs
           node scripts/export-offline-streets.mjs \
@@ -108,7 +137,8 @@ jobs:
             --limit "${{ github.event.inputs.limit || '300' }}" \
             --countries "${{ matrix.country }}"
 
-      - if: steps.gate.outputs.run == 'true'
+      - name: Upload part
+        if: steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: streets-${{ matrix.country }}
@@ -140,10 +170,18 @@ jobs:
           python-version: '3.12'
       - name: Install + sync CN
         working-directory: address
+        env:
+          PATH: ${{ github.workspace }}/address/.venv/bin:/usr/local/bin:/usr/bin:/bin
         run: |
-          sudo apt-get update && sudo apt-get install -y xz-utils
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            xz-utils build-essential cmake \
+            libexpat1-dev zlib1g-dev libbz2-dev
           npm ci
           python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r server/sync/requirements.txt
           cp .env.example .env
           {
             echo "ADDRESS_DATABASE_PATH=data/address.sqlite"
@@ -154,11 +192,17 @@ jobs:
           } >> .env
           mkdir -p data scripts
           npm run db:migrate
-          export PATH="$PWD/.venv/bin:$PATH"
+          # 重新导出 PATH 含 venv（本 step 的 env 在 venv 创建前就固定了，这里显式 export）
+          export PATH="$PWD/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+          which python3
+          python3 -c "import duckdb, osmium; print('cn-python-ok', duckdb.__version__)"
           node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard CN
           cp ../self/scripts/export-offline-streets.mjs scripts/export-offline-streets.mjs
-          node scripts/export-offline-streets.mjs --db data/address.sqlite --out offline-part \
-            --limit "${{ github.event.inputs.limit || '300' }}" --countries CN
+          node scripts/export-offline-streets.mjs \
+            --db data/address.sqlite \
+            --out offline-part \
+            --limit "${{ github.event.inputs.limit || '300' }}" \
+            --countries CN
       - uses: actions/upload-artifact@v4
         with:
           name: streets-CN
@@ -171,7 +215,8 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download parts
+        uses: actions/download-artifact@v4
         with:
           pattern: streets-*
           path: gathered
@@ -179,45 +224,61 @@ jobs:
 
       - name: Build offline-addresses
         run: |
+          set -euo pipefail
           mkdir -p offline-addresses
           find gathered -type f -name '*.json' ! -name 'index.json' -print0 \
-            | while IFS= read -r -d '' f; do cp -f "$f" "offline-addresses/$(basename "$f")"; done
+            | while IFS= read -r -d '' f; do
+                cp -f "$f" "offline-addresses/$(basename "$f")"
+              done
           node <<'NODE'
           const fs = require('fs');
           const path = require('path');
           const dir = 'offline-addresses';
+          if (!fs.existsSync(dir)) {
+            console.log('no data');
+            process.exit(0);
+          }
           const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json') && f !== 'index.json');
           const countries = {};
           for (const f of files) {
             const rows = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
-            if (!Array.isArray(rows)) throw new Error(f);
+            if (!Array.isArray(rows)) throw new Error('not array: ' + f);
             const seen = new Set();
+            const admin1 = new Set();
             for (const s of rows) {
               const key = [s.country, s.admin1, s.locality, s.district, s.postcode, s.street]
                 .map((x) => String(x ?? '').trim().toLowerCase()).join('\u001f');
-              if (seen.has(key)) throw new Error('dup ' + f + ' ' + s.street);
+              if (seen.has(key)) throw new Error('dup street in ' + f + ': ' + s.street);
               seen.add(key);
-              if (!s.houseNumbers?.length) throw new Error('no houseNumbers ' + f);
-              // 不应再出现 zh-CN
+              if (!Array.isArray(s.houseNumbers) || s.houseNumbers.length < 1) {
+                throw new Error('empty houseNumbers in ' + f + ': ' + s.street);
+              }
               if (s.address?.['zh-CN'] || s.components?.['zh-CN']) {
                 throw new Error('zh-CN leaked in ' + f);
               }
+              if (s.admin1 || s.admin1Code) admin1.add(s.admin1 || s.admin1Code);
             }
             const cc = (rows[0]?.country || f.replace(/\.json$/i, '')).toUpperCase();
-            countries[cc] = { file: f, streetCount: rows.length };
+            countries[cc] = {
+              file: f,
+              streetCount: rows.length,
+              admin1Count: admin1.size,
+            };
           }
           fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify({
             generatedAt: new Date().toISOString(),
-            mode: 'street-dedup',
+            mode: 'street-dedup-spread-admin1',
             languages: ['native', 'en'],
             limitPerCountry: Number(process.env.LIMIT || 300),
             countries,
           }, null, 2));
+          console.log(JSON.stringify(countries, null, 2));
           NODE
         env:
           LIMIT: ${{ github.event.inputs.limit || '300' }}
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload offline-addresses
+        uses: actions/upload-artifact@v4
         with:
           name: offline-addresses
           path: offline-addresses/
