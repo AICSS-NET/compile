@@ -3,6 +3,7 @@
  *
  * - 按 国家+州+城市+区+邮编+街道 去重
  * - houseNumbers 仅含库中真实出现的门牌
+ * - 按 admin1（州/省）轮询分散，避免集中在同一地区
  * - 语言只保留 native + en（丢弃 zh-CN）
  * - 空字符串 / 空数组 / 空对象不写出
  * - 不含坐标
@@ -11,6 +12,7 @@
  *   node scripts/export-offline-streets.mjs
  *   node scripts/export-offline-streets.mjs --limit 300 --out offline-addresses
  *   node scripts/export-offline-streets.mjs --countries US,JP --limit 300
+ *   node scripts/export-offline-streets.mjs --db data/address.sqlite
  */
 
 import fs from 'node:fs';
@@ -58,6 +60,17 @@ function streetGroupKey(row) {
   ].join('\u001f');
 }
 
+function recordDedupeKey(s) {
+  return [
+    s.country,
+    normKey(s.admin1),
+    normKey(s.locality),
+    normKey(s.district),
+    normKey(s.postcode),
+    normKey(s.street),
+  ].join('\u001f');
+}
+
 function parseJson(text) {
   try {
     return JSON.parse(text || '{}');
@@ -66,9 +79,8 @@ function parseJson(text) {
   }
 }
 
-/** 只保留 native + en；去掉空值 */
+/** 只保留 native + en */
 function pickLangVariants(raw, mode) {
-  // mode: 'address' => 值为字符串；'component' => 值为对象
   if (!raw || typeof raw !== 'object') return undefined;
   const out = {};
   for (const lang of ['native', 'en']) {
@@ -90,7 +102,7 @@ function pickLangVariants(raw, mode) {
   return Object.keys(out).length ? out : undefined;
 }
 
-/** 递归去掉空字符串 / 空数组 / 空对象 / undefined */
+/** 去掉空字符串 / 空数组 / 空对象 / undefined */
 function compact(value) {
   if (value == null) return undefined;
   if (typeof value === 'string') {
@@ -126,6 +138,50 @@ function listCountries(db) {
     )
     .all()
     .map((r) => r.c);
+}
+
+function shuffleInPlace(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/**
+ * 按 admin1（州/省）轮询分散取样，尽量覆盖更多州/省
+ */
+function pickStreetsSpreadByAdmin1(streets, limit) {
+  const byAdmin = new Map();
+  for (const s of streets) {
+    const k = normKey(s.admin1) || normKey(s.admin1Code) || '_unknown';
+    if (!byAdmin.has(k)) byAdmin.set(k, []);
+    byAdmin.get(k).push(s);
+  }
+
+  const buckets = [...byAdmin.values()];
+  for (const b of buckets) shuffleInPlace(b);
+  shuffleInPlace(buckets);
+
+  const picked = [];
+  const seen = new Set();
+  let progress = true;
+  while (picked.length < limit && progress) {
+    progress = false;
+    for (const bucket of buckets) {
+      if (picked.length >= limit) break;
+      while (bucket.length) {
+        const s = bucket.pop();
+        const key = recordDedupeKey(s);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        picked.push(s);
+        progress = true;
+        break;
+      }
+    }
+  }
+  return picked;
 }
 
 function loadStreetGroups(db, countryCode) {
@@ -204,7 +260,6 @@ function loadStreetGroups(db, countryCode) {
       }
     }
 
-    // 顶层字段用 native 源数据；双语放 variants（仅 native+en）
     const record = {
       country: g.country,
       admin1: g.admin1,
@@ -220,39 +275,27 @@ function loadStreetGroups(db, countryCode) {
       buildingNames: [...g.buildingNames].sort((a, b) => a.localeCompare(b, 'und')),
       propertyType: propertyType === 'unknown' ? '' : propertyType,
       nativeLanguage: g.nativeLanguage,
-      address: g.addressVariants, // { native?, en? } 整行
-      components: g.componentVariants, // { native?: {...}, en?: {...} }
+      address: g.addressVariants,
+      components: g.componentVariants,
     };
 
-    // houseNumbers 必须保留；compact 后若被误删则手动加回
-    const compacted = compact(record);
+    const compacted = compact(record) || {};
     if (!compacted.houseNumbers?.length) {
       compacted.houseNumbers = record.houseNumbers;
     }
+    if (!compacted.country) compacted.country = g.country;
+    if (!compacted.street) compacted.street = g.street;
     return compacted;
   });
-}
-
-function shuffleInPlace(arr) {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
 }
 
 function assertNoDuplicateStreets(streets, country) {
   const seen = new Set();
   for (const s of streets) {
-    const key = [
-      s.country,
-      normKey(s.admin1),
-      normKey(s.locality),
-      normKey(s.district),
-      normKey(s.postcode),
-      normKey(s.street),
-    ].join('\u001f');
-    if (seen.has(key)) throw new Error(`重复街道: ${country} ${s.street}`);
+    const key = recordDedupeKey(s);
+    if (seen.has(key)) {
+      throw new Error(`重复街道: ${country} / ${s.street}`);
+    }
     seen.add(key);
   }
 }
@@ -270,7 +313,7 @@ function main() {
 
   const index = {
     generatedAt: new Date().toISOString(),
-    mode: 'street-dedup',
+    mode: 'street-dedup-spread-admin1',
     languages: ['native', 'en'],
     limitPerCountry: opts.limit,
     coordinates: false,
@@ -279,19 +322,24 @@ function main() {
 
   for (const cc of countries) {
     const all = loadStreetGroups(db, cc);
-    shuffleInPlace(all);
-    const picked = all.slice(0, opts.limit);
+    const picked = pickStreetsSpreadByAdmin1(all, opts.limit);
     assertNoDuplicateStreets(picked, cc);
 
+    const admin1Set = new Set(
+      picked.map((s) => s.admin1 || s.admin1Code || '').filter(Boolean)
+    );
+
     const file = `${cc.toLowerCase()}.json`;
-    // 紧凑 JSON，无缩进
     fs.writeFileSync(path.join(opts.outDir, file), JSON.stringify(picked), 'utf8');
     index.countries[cc] = {
       file,
       streetCount: picked.length,
       totalInDb: all.length,
+      admin1Count: admin1Set.size,
     };
-    console.log(`${cc}: ${picked.length}/${all.length} -> ${file}`);
+    console.log(
+      `${cc}: streets ${picked.length}/${all.length}, admin1=${admin1Set.size} -> ${file}`
+    );
   }
 
   fs.writeFileSync(
