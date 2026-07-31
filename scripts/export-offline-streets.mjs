@@ -3,16 +3,14 @@
  *
  * - 按 国家+州+城市+区+邮编+街道 去重
  * - houseNumbers 仅含库中真实出现的门牌
- * - 按 admin1（州/省）轮询分散，避免集中在同一地区
- * - 语言只保留 native + en（丢弃 zh-CN）
- * - 空字符串 / 空数组 / 空对象不写出
- * - 不含坐标
+ * - 按 admin1（州/省）轮询分散
+ * - 语言只保留 native + en
+ * - 空字段不写出；不含坐标
  *
  * 用法:
  *   node scripts/export-offline-streets.mjs
  *   node scripts/export-offline-streets.mjs --limit 300 --out offline-addresses
  *   node scripts/export-offline-streets.mjs --countries US,JP --limit 300
- *   node scripts/export-offline-streets.mjs --db data/address.sqlite
  */
 
 import fs from 'node:fs';
@@ -79,7 +77,6 @@ function parseJson(text) {
   }
 }
 
-/** 只保留 native + en */
 function pickLangVariants(raw, mode) {
   if (!raw || typeof raw !== 'object') return undefined;
   const out = {};
@@ -102,7 +99,6 @@ function pickLangVariants(raw, mode) {
   return Object.keys(out).length ? out : undefined;
 }
 
-/** 去掉空字符串 / 空数组 / 空对象 / undefined */
 function compact(value) {
   if (value == null) return undefined;
   if (typeof value === 'string') {
@@ -148,9 +144,6 @@ function shuffleInPlace(arr) {
   return arr;
 }
 
-/**
- * 按 admin1（州/省）轮询分散取样，尽量覆盖更多州/省
- */
 function pickStreetsSpreadByAdmin1(streets, limit) {
   const byAdmin = new Map();
   for (const s of streets) {
@@ -280,9 +273,7 @@ function loadStreetGroups(db, countryCode) {
     };
 
     const compacted = compact(record) || {};
-    if (!compacted.houseNumbers?.length) {
-      compacted.houseNumbers = record.houseNumbers;
-    }
+    if (!compacted.houseNumbers?.length) compacted.houseNumbers = record.houseNumbers;
     if (!compacted.country) compacted.country = g.country;
     if (!compacted.street) compacted.street = g.street;
     return compacted;
@@ -293,9 +284,7 @@ function assertNoDuplicateStreets(streets, country) {
   const seen = new Set();
   for (const s of streets) {
     const key = recordDedupeKey(s);
-    if (seen.has(key)) {
-      throw new Error(`重复街道: ${country} / ${s.street}`);
-    }
+    if (seen.has(key)) throw new Error(`重复街道: ${country} / ${s.street}`);
     seen.add(key);
   }
 }
