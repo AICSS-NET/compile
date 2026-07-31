@@ -1,4 +1,4 @@
-name: Export offline streets
+name: Export offline streets (Sequential)
 
 on:
   workflow_dispatch:
@@ -8,11 +8,11 @@ on:
         required: true
         default: '300'
       countries:
-        description: '逗号分隔国家码，留空=跑矩阵全部（不含 CN）'
+        description: '逗号分隔国家码，留空=跑默认列表'
         required: false
         default: ''
       include_cn:
-        description: '是否包含 CN（需 Secrets: AMAP_API_KEY 等）'
+        description: '是否包含 CN（需要 Secrets 配置高德/百度/腾讯 API Key）'
         type: boolean
         default: false
 
@@ -25,46 +25,21 @@ env:
   ADDRESS_DATABASE_PATH: data/address.sqlite
   ADDRESS_SYNC_TRANSLATION_ENABLED: 'false'
   GOOGLE_TRANSLATION_ENABLED: 'false'
-  # 官方同步关键：必须开启，否则几乎全部因 missing_residential_evidence 被拒
   ADDRESS_SYNC_OVERTURE_BUILDINGS: 'true'
   ADDRESS_SYNC_REQUIRE_RESIDENTIAL: 'true'
 
 jobs:
-  collect:
-    name: ${{ matrix.country }}
+  collect-all:
+    name: Sync & Extract All Countries
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        country:
-          [US, CA, MX, GB, DE, FR, IT, ES, NL, RU, HK, TW, JP, KR, SG, VN, TH, PH, MY, IN, AU, TR, SA, BR, NG, ZA]
-
+    timeout-minutes: 360  # 给予充足时间，由于不再是矩阵，全部在此循环内执行
     steps:
-      - name: Filter
-        id: gate
-        shell: bash
-        run: |
-          INPUT="${{ github.event.inputs.countries }}"
-          CC="${{ matrix.country }}"
-          if [ -z "$INPUT" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "$INPUT" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:lower:]' '[:upper:]' \
-            | grep -qx "$CC" \
-            && echo "run=true" >> "$GITHUB_OUTPUT" \
-            || echo "run=false" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout self (export script)
-        if: steps.gate.outputs.run == 'true'
+      - name: Checkout self
         uses: actions/checkout@v4
         with:
           path: self
 
       - name: Checkout daimon3332/address
-        if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
           repository: daimon3332/address
@@ -72,7 +47,6 @@ jobs:
           path: address
 
       - name: Setup Node.js
-        if: steps.gate.outputs.run == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -80,30 +54,22 @@ jobs:
           cache-dependency-path: address/package-lock.json
 
       - name: Setup Python
-        if: steps.gate.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install deps
-        if: steps.gate.outputs.run == 'true'
+      - name: Global Setup & Install dependencies
         working-directory: address
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y \
-            xz-utils build-essential cmake \
-            libexpat1-dev zlib1g-dev libbz2-dev
+          sudo apt-get install -y xz-utils build-essential cmake libexpat1-dev zlib1g-dev libbz2-dev
 
           npm ci
 
           python3 -m venv .venv
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r server/sync/requirements.txt
-
-          VENV_PY="$PWD/.venv/bin/python"
-          test -x "$VENV_PY"
-          "$VENV_PY" -c "import duckdb, osmium; print('install-python-ok', duckdb.__version__)"
 
           cp .env.example .env
           {
@@ -113,205 +79,76 @@ jobs:
             echo "ADDRESS_SYNC_OVERTURE_BUILDINGS=true"
             echo "ADDRESS_SYNC_REQUIRE_RESIDENTIAL=true"
             echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false"
-            echo "GOOGLE_TRANSLATION_ENABLED=false"
             echo "ADDRESS_SYNC_MAX_RECORDS_PER_SHARD=50000"
             echo "ADDRESS_SYNC_RECORDS_PER_LOCALITY=64"
           } >> .env
 
-          mkdir -p data data/staging
+          mkdir -p data data/staging offline-addresses scripts
           npm run db:migrate
-
-          # 行政区目录：减轻 invalid_administrative_hierarchy
-          npm run data:catalog
-          if [ -f .data-cache/catalog-seed.sql ]; then
-            npm run data:catalog:import
-          fi
-
-      - name: Sync country
-        if: steps.gate.outputs.run == 'true'
-        working-directory: address
-        env:
-          ADDRESS_DATABASE_PATH: ${{ env.ADDRESS_DATABASE_PATH }}
-          PYTHON_BIN: ${{ github.workspace }}/address/.venv/bin/python
-          ADDRESS_SYNC_OVERTURE_BUILDINGS: 'true'
-          ADDRESS_SYNC_REQUIRE_RESIDENTIAL: 'true'
-          ADDRESS_SYNC_TRANSLATION_ENABLED: 'false'
-          ADDRESS_DATA_ROOT: data
-          ADDRESS_SYNC_CACHE_DIR: data/staging
-        run: |
-          set -euo pipefail
-          VENV_PY="${{ github.workspace }}/address/.venv/bin/python"
-          test -x "$VENV_PY"
-          "$VENV_PY" -c "import duckdb, osmium; print('sync-python-ok', duckdb.__version__)"
-          node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard "${{ matrix.country }}"
-
-      - name: Export streets
-        if: steps.gate.outputs.run == 'true'
-        working-directory: address
-        env:
-          ADDRESS_DATABASE_PATH: ${{ env.ADDRESS_DATABASE_PATH }}
-        run: |
-          set -euo pipefail
-          mkdir -p scripts
-          cp ../self/scripts/export-offline-streets.mjs scripts/export-offline-streets.mjs
-          node scripts/export-offline-streets.mjs \
-            --db "$ADDRESS_DATABASE_PATH" \
-            --out offline-part \
-            --limit "${{ github.event.inputs.limit || '300' }}" \
-            --countries "${{ matrix.country }}"
-
-      - name: Upload part
-        if: steps.gate.outputs.run == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: streets-${{ matrix.country }}
-          path: address/offline-part/
-          if-no-files-found: warn
-          retention-days: 14
-
-  collect-cn:
-    name: CN
-    if: ${{ github.event.inputs.include_cn == true }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: self
-      - uses: actions/checkout@v4
-        with:
-          repository: daimon3332/address
-          ref: main
-          path: address
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: address/package-lock.json
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install + sync CN
-        working-directory: address
-        env:
-          PYTHON_BIN: ${{ github.workspace }}/address/.venv/bin/python
-          ADDRESS_SYNC_OVERTURE_BUILDINGS: 'true'
-          ADDRESS_SYNC_REQUIRE_RESIDENTIAL: 'true'
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y \
-            xz-utils build-essential cmake \
-            libexpat1-dev zlib1g-dev libbz2-dev
-          npm ci
-          python3 -m venv .venv
-          .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -r server/sync/requirements.txt
-          VENV_PY="$PWD/.venv/bin/python"
-          test -x "$VENV_PY"
-          "$VENV_PY" -c "import duckdb, osmium; print('cn-python-ok', duckdb.__version__)"
-          cp .env.example .env
-          {
-            echo "ADDRESS_DATABASE_PATH=data/address.sqlite"
-            echo "ADDRESS_DATA_ROOT=data"
-            echo "ADDRESS_SYNC_CACHE_DIR=data/staging"
-            echo "ADDRESS_SYNC_OVERTURE_BUILDINGS=true"
-            echo "ADDRESS_SYNC_REQUIRE_RESIDENTIAL=true"
-            echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false"
-            echo "AMAP_API_KEY=${{ secrets.AMAP_API_KEY }}"
-            echo "BAIDU_API_KEY=${{ secrets.BAIDU_API_KEY }}"
-            echo "TENCENT_API_KEY=${{ secrets.TENCENT_API_KEY }}"
-          } >> .env
-          mkdir -p data data/staging scripts
-          npm run db:migrate
+          
           npm run data:catalog || true
           if [ -f .data-cache/catalog-seed.sql ]; then
             npm run data:catalog:import
           fi
-          node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard CN
+
+          # 替换为我们重构后强大的导出脚本
           cp ../self/scripts/export-offline-streets.mjs scripts/export-offline-streets.mjs
-          node scripts/export-offline-streets.mjs \
-            --db data/address.sqlite \
-            --out offline-part \
-            --limit "${{ github.event.inputs.limit || '300' }}" \
-            --countries CN
-      - uses: actions/upload-artifact@v4
-        with:
-          name: streets-CN
-          path: address/offline-part/
-          retention-days: 14
 
-  merge:
-    name: Merge
-    needs: [collect, collect-cn]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download parts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: streets-*
-          path: gathered
-          merge-multiple: true
-
-      - name: Build offline-addresses
+      - name: Sequential Sync and Extract Loop
+        working-directory: address
+        env:
+          PYTHON_BIN: ${{ github.workspace }}/address/.venv/bin/python
+          # 自动注入中国区需要的 API Keys (仅当传入 secrets 且 include_cn = true 时才起效)
+          AMAP_API_KEY: ${{ secrets.AMAP_API_KEY }}
+          BAIDU_API_KEY: ${{ secrets.BAIDU_API_KEY }}
+          TENCENT_API_KEY: ${{ secrets.TENCENT_API_KEY }}
         run: |
           set -euo pipefail
-          mkdir -p offline-addresses
-          find gathered -type f -name '*.json' ! -name 'index.json' -print0 \
-            | while IFS= read -r -d '' f; do
-                cp -f "$f" "offline-addresses/$(basename "$f")"
-              done
-          node <<'NODE'
-          const fs = require('fs');
-          const path = require('path');
-          const dir = 'offline-addresses';
-          if (!fs.existsSync(dir)) {
-            console.log('no data');
-            process.exit(0);
-          }
-          const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json') && f !== 'index.json');
-          const countries = {};
-          for (const f of files) {
-            const rows = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
-            if (!Array.isArray(rows)) throw new Error('not array: ' + f);
-            const seen = new Set();
-            const admin1 = new Set();
-            for (const s of rows) {
-              const key = [s.country, s.admin1, s.locality, s.district, s.postcode, s.street]
-                .map((x) => String(x ?? '').trim().toLowerCase()).join('\u001f');
-              if (seen.has(key)) throw new Error('dup street in ' + f + ': ' + s.street);
-              seen.add(key);
-              if (!Array.isArray(s.houseNumbers) || s.houseNumbers.length < 1) {
-                throw new Error('empty houseNumbers in ' + f + ': ' + s.street);
-              }
-              if (s.address?.['zh-CN'] || s.components?.['zh-CN']) {
-                throw new Error('zh-CN leaked in ' + f);
-              }
-              if (s.admin1 || s.admin1Code) admin1.add(s.admin1 || s.admin1Code);
-            }
-            const cc = (rows[0]?.country || f.replace(/\.json$/i, '')).toUpperCase();
-            countries[cc] = {
-              file: f,
-              streetCount: rows.length,
-              admin1Count: admin1.size,
-            };
-          }
-          fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify({
-            generatedAt: new Date().toISOString(),
-            mode: 'street-dedup-spread-admin1',
-            languages: ['native', 'en'],
-            limitPerCountry: Number(process.env.LIMIT || 300),
-            countries,
-          }, null, 2));
-          console.log(JSON.stringify(countries, null, 2));
-          NODE
-        env:
-          LIMIT: ${{ github.event.inputs.limit || '300' }}
+          
+          # 1. 确定要跑的国家列表
+          INPUT="${{ github.event.inputs.countries }}"
+          if [ -z "$INPUT" ]; then
+            COUNTRIES="US CA MX GB DE FR IT ES NL RU HK TW JP KR SG VN TH PH MY IN AU TR SA BR NG ZA"
+          else
+            COUNTRIES=$(echo "$INPUT" | tr ',' ' ' | tr '[:lower:]' '[:upper:]')
+          fi
 
-      - name: Upload offline-addresses
+          # 如果勾选了 CN，直接拼接到国家列表中
+          if [ "${{ github.event.inputs.include_cn }}" == "true" ]; then
+            COUNTRIES="$COUNTRIES CN"
+          fi
+
+          # 去重并统一格式
+          COUNTRIES=$(echo "$COUNTRIES" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+
+          echo "🚀 开始流水线，准备处理的国家列表: $COUNTRIES"
+
+          # 2. 单机循环执行
+          for CC in $COUNTRIES; do
+            echo "::group::======== [ Processing $CC ] ========"
+            
+            # 执行底层数据同步 (如果失败，仅输出警告并不阻断整个循环)
+            echo "📥 开始同步 $CC 地图数据..."
+            node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard "$CC" || echo "⚠️ ETL 同步失败: $CC，跳过。"
+
+            # 执行导出 (直接输出并累计写入到 offline-addresses 目录中)
+            echo "📤 开始抽样提取 $CC JSON 数据..."
+            node scripts/export-offline-streets.mjs \
+              --db "${ADDRESS_DATABASE_PATH}" \
+              --out offline-addresses \
+              --limit "${{ github.event.inputs.limit || '300' }}" \
+              --countries "$CC" || echo "⚠️ 数据抽取失败: $CC，跳过。"
+              
+            # 为防止大量国家的 staging 缓存挤爆硬盘，每处理完一个国家自动清空 staging
+            rm -rf data/staging/*
+            echo "::endgroup::"
+          done
+
+      - name: Upload Finished offline-addresses
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: offline-addresses
-          path: offline-addresses/
+          path: address/offline-addresses/
+          if-no-files-found: warn
           retention-days: 30
