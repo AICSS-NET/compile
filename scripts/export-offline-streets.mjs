@@ -1,16 +1,11 @@
 /**
  * 从 daimon3332/address 的 address.sqlite 导出离线街道 JSON
  *
- * - 按 国家+州+城市+区+邮编+街道 去重
- * - houseNumbers 仅含库中真实出现的门牌
- * - 按 admin1（州/省）轮询分散
- * - 语言只保留 native + en
- * - 空字段不写出；不含坐标
- *
- * 用法:
- *   node scripts/export-offline-streets.mjs
- *   node scripts/export-offline-streets.mjs --limit 300 --out offline-addresses
- *   node scripts/export-offline-streets.mjs --countries US,JP --limit 300
+ * 【重构优化版】
+ * - 数据结构扁平改树形：Country -> Admin1 -> Locality -> District -> Street -> { postcode, range }
+ * - 门牌号(houseNumbers) 压缩：按连续数字压缩合并（例如 [1,2,3,5] -> "1-3, 5"）
+ * - 提取策略（Round-Robin）：限制单省最多1000条，单市最多100条；多省市轮流循环均匀抽取，直到总数达到 limit。
+ * - 多次调用安全：支持循环更新追加同一份 index.json
  */
 
 import fs from 'node:fs';
@@ -99,26 +94,12 @@ function pickLangVariants(raw, mode) {
   return Object.keys(out).length ? out : undefined;
 }
 
-function compact(value) {
-  if (value == null) return undefined;
-  if (typeof value === 'string') {
-    const s = value.trim();
-    return s === '' ? undefined : s;
+function shuffleInPlace(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
   }
-  if (typeof value === 'number' || typeof value === 'boolean') return value;
-  if (Array.isArray(value)) {
-    const arr = value.map(compact).filter((v) => v !== undefined);
-    return arr.length ? arr : undefined;
-  }
-  if (typeof value === 'object') {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) {
-      const cv = compact(v);
-      if (cv !== undefined) out[k] = cv;
-    }
-    return Object.keys(out).length ? out : undefined;
-  }
-  return undefined;
+  return arr;
 }
 
 function openDb(dbPath) {
@@ -129,49 +110,149 @@ function openDb(dbPath) {
 
 function listCountries(db) {
   return db
-    .prepare(
-      `SELECT DISTINCT country_code AS c FROM address_pool WHERE active = 1 ORDER BY 1`
-    )
+    .prepare(`SELECT DISTINCT country_code AS c FROM address_pool WHERE active = 1 ORDER BY 1`)
     .all()
     .map((r) => r.c);
 }
 
-function shuffleInPlace(arr) {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
+// 门牌号压缩合并核心逻辑 (例如: [1, 2, 3, 5, "12A"] -> "1-3, 5, 12A")
+function compressHouseNumbers(arr) {
+  if (!arr || !arr.length) return "";
+  const nums = [];
+  const nonNums = [];
+  for (const val of arr) {
+    const str = String(val).trim();
+    if (!str) continue;
+    const n = parseInt(str, 10);
+    // 判断是否是纯正的整数
+    if (String(n) === str) {
+      nums.push(n);
+    } else {
+      nonNums.push(str);
+    }
   }
-  return arr;
+  nums.sort((a, b) => a - b);
+  nonNums.sort((a, b) => a.localeCompare(b, 'und', { numeric: true }));
+
+  const ranges = [];
+  if (nums.length > 0) {
+    let start = nums[0];
+    let end = nums[0];
+    for (let i = 1; i < nums.length; i++) {
+      if (nums[i] === end + 1) {
+        end = nums[i];
+      } else if (nums[i] > end) { // 遇到不连续且不重复的
+        ranges.push(start === end ? String(start) : `${start}-${end}`);
+        start = nums[i];
+        end = nums[i];
+      }
+    }
+    ranges.push(start === end ? String(start) : `${start}-${end}`);
+  }
+  return [...ranges, ...nonNums].join(', ');
 }
 
-function pickStreetsSpreadByAdmin1(streets, limit) {
-  const byAdmin = new Map();
+// 三级水桶轮询抽样算法
+function pickStreetsRoundRobin(streets, limit) {
+  const tree = new Map(); // admin1 -> Map(locality -> array of streets)
   for (const s of streets) {
-    const k = normKey(s.admin1) || normKey(s.admin1Code) || '_unknown';
-    if (!byAdmin.has(k)) byAdmin.set(k, []);
-    byAdmin.get(k).push(s);
+    const a1 = normKey(s.admin1) || normKey(s.admin1Code) || '-';
+    const loc = normKey(s.locality) || '-';
+
+    if (!tree.has(a1)) tree.set(a1, new Map());
+    const a1Map = tree.get(a1);
+    if (!a1Map.has(loc)) a1Map.set(loc, []);
+    a1Map.get(loc).push(s);
   }
 
-  const buckets = [...byAdmin.values()];
-  for (const b of buckets) shuffleInPlace(b);
-  shuffleInPlace(buckets);
+  const pool = [];
+  for (const [a1, locMap] of tree.entries()) {
+    const localities = [];
+    const locKeys = Array.from(locMap.keys());
+    shuffleInPlace(locKeys);
+
+    let a1Total = 0;
+    for (const loc of locKeys) {
+      const locStreets = locMap.get(loc);
+      shuffleInPlace(locStreets);
+      // 核心要求：单城市最大 100 条
+      const capped = locStreets.slice(0, 100);
+      a1Total += capped.length;
+      localities.push({ key: loc, streets: capped });
+    }
+
+    // 核心要求：单省份最大 1000 条
+    if (a1Total > 1000) {
+      let kept = 0;
+      for (const locState of localities) {
+        const space = 1000 - kept;
+        if (space <= 0) {
+          locState.streets = [];
+        } else if (locState.streets.length > space) {
+          locState.streets = locState.streets.slice(0, space);
+          kept = 1000;
+        } else {
+          kept += locState.streets.length;
+        }
+      }
+    }
+
+    const validLocalities = localities.filter(l => l.streets.length > 0);
+    if (validLocalities.length > 0) {
+      pool.push({ key: a1, localities: validLocalities, locIdx: 0 });
+    }
+  }
+
+  // 打乱省份顺序
+  shuffleInPlace(pool);
 
   const picked = [];
   const seen = new Set();
   let progress = true;
-  while (picked.length < limit && progress) {
+
+  // 开始抽牌：确保均匀分布在各个城市和省份，不够自动补足
+  while (picked.length < limit && progress && pool.length > 0) {
     progress = false;
-    for (const bucket of buckets) {
+    for (let i = 0; i < pool.length; i++) {
       if (picked.length >= limit) break;
-      while (bucket.length) {
-        const s = bucket.pop();
+      const a1State = pool[i];
+      if (a1State.localities.length === 0) continue;
+
+      const locState = a1State.localities[a1State.locIdx];
+
+      // 找一条还没被选过的街道
+      let street = null;
+      while (locState.streets.length > 0) {
+        const s = locState.streets.pop();
         const key = recordDedupeKey(s);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        picked.push(s);
-        progress = true;
-        break;
+        if (!seen.has(key)) {
+          seen.add(key);
+          street = s;
+          break;
+        }
       }
+
+      if (street) {
+        picked.push(street);
+        progress = true;
+      }
+
+      // 处理城市轮询游标
+      if (locState.streets.length === 0) {
+        // 当前城市被抽干，剔除
+        a1State.localities.splice(a1State.locIdx, 1);
+        if (a1State.locIdx >= a1State.localities.length) {
+          a1State.locIdx = 0;
+        }
+      } else {
+        // 下次抽同省的下一个城市
+        a1State.locIdx = (a1State.locIdx + 1) % a1State.localities.length;
+      }
+    }
+
+    // 清理被抽干的省份
+    for (let i = pool.length - 1; i >= 0; i--) {
+      if (pool[i].localities.length === 0) pool.splice(i, 1);
     }
   }
   return picked;
@@ -205,24 +286,18 @@ function loadStreetGroups(db, countryCode) {
         admin1: row.admin1 || '',
         admin1Code: row.admin1_code || '',
         locality: row.locality || '',
-        postalLocality: row.postal_locality || '',
         district: row.district || '',
         postcode: row.postcode || '',
         street: row.street || '',
         nativeLanguage: row.native_language || '',
         houseNumbers: new Set(),
-        buildingNames: new Set(),
         propertyTypes: new Map(),
         bestQuality: -1,
-        addressVariants: undefined,
-        componentVariants: undefined,
       };
       groups.set(key, g);
     }
 
     g.houseNumbers.add(String(row.house_number).normalize('NFKC').trim());
-    const bn = String(row.building_name || '').trim();
-    if (bn) g.buildingNames.add(bn);
 
     const pt = row.property_type || 'unknown';
     g.propertyTypes.set(pt, (g.propertyTypes.get(pt) || 0) + 1);
@@ -230,14 +305,6 @@ function loadStreetGroups(db, countryCode) {
     const q = Number(row.quality_score) || 0;
     if (q >= g.bestQuality) {
       g.bestQuality = q;
-      g.street = row.street || g.street;
-      g.admin1 = row.admin1 || g.admin1;
-      g.admin1Code = row.admin1_code || g.admin1Code;
-      g.locality = row.locality || g.locality;
-      g.postalLocality = row.postal_locality || g.postalLocality;
-      g.district = row.district || g.district;
-      g.postcode = row.postcode || g.postcode;
-      g.nativeLanguage = row.native_language || g.nativeLanguage;
       g.addressVariants = pickLangVariants(parseJson(row.address_variants_json), 'address');
       g.componentVariants = pickLangVariants(parseJson(row.component_variants_json), 'component');
     }
@@ -252,41 +319,55 @@ function loadStreetGroups(db, countryCode) {
         propertyType = pt;
       }
     }
-
-    const record = {
+    return {
       country: g.country,
       admin1: g.admin1,
       admin1Code: g.admin1Code,
       locality: g.locality,
-      postalLocality: g.postalLocality,
       district: g.district,
       postcode: g.postcode,
       street: g.street,
-      houseNumbers: [...g.houseNumbers].sort((a, b) =>
-        a.localeCompare(b, 'und', { numeric: true })
-      ),
-      buildingNames: [...g.buildingNames].sort((a, b) => a.localeCompare(b, 'und')),
+      houseNumbers: [...g.houseNumbers],
       propertyType: propertyType === 'unknown' ? '' : propertyType,
       nativeLanguage: g.nativeLanguage,
       address: g.addressVariants,
       components: g.componentVariants,
     };
-
-    const compacted = compact(record) || {};
-    if (!compacted.houseNumbers?.length) compacted.houseNumbers = record.houseNumbers;
-    if (!compacted.country) compacted.country = g.country;
-    if (!compacted.street) compacted.street = g.street;
-    return compacted;
   });
 }
 
-function assertNoDuplicateStreets(streets, country) {
-  const seen = new Set();
+// 构建树形 JSON 对象
+function buildTreeJSON(streets) {
+  const tree = {};
   for (const s of streets) {
-    const key = recordDedupeKey(s);
-    if (seen.has(key)) throw new Error(`重复街道: ${country} / ${s.street}`);
-    seen.add(key);
+    const c = (s.country || '-').toUpperCase();
+    const a1 = s.admin1 ? s.admin1 : (s.admin1Code ? s.admin1Code : '-');
+    const loc = s.locality ? s.locality : '-';
+    const dist = s.district ? s.district : '-';
+    let streetName = s.street ? s.street : '-';
+
+    if (!tree[c]) tree[c] = {};
+    if (!tree[c][a1]) tree[c][a1] = {};
+    if (!tree[c][a1][loc]) tree[c][a1][loc] = {};
+    if (!tree[c][a1][loc][dist]) tree[c][a1][loc][dist] = {};
+
+    // 处理同一条街在同个区下但 Postcode 不同的极小概率冲突
+    if (tree[c][a1][loc][dist][streetName] && tree[c][a1][loc][dist][streetName].postcode !== s.postcode) {
+      streetName = `${streetName} (zip:${s.postcode || 'null'})`;
+    }
+
+    const node = {
+      postcode: s.postcode || "",
+      range: compressHouseNumbers(s.houseNumbers)
+    };
+    if (s.propertyType) node.propertyType = s.propertyType;
+    if (s.nativeLanguage) node.nativeLanguage = s.nativeLanguage;
+    if (s.address) node.address = s.address;
+    if (s.components) node.components = s.components;
+
+    tree[c][a1][loc][dist][streetName] = node;
   }
+  return tree;
 }
 
 function main() {
@@ -300,44 +381,50 @@ function main() {
   const db = openDb(opts.db);
   const countries = opts.countries?.length ? opts.countries : listCountries(db);
 
-  const index = {
-    generatedAt: new Date().toISOString(),
-    mode: 'street-dedup-spread-admin1',
-    languages: ['native', 'en'],
-    limitPerCountry: opts.limit,
-    coordinates: false,
-    countries: {},
-  };
+  // 安全地读写 index.json（适配单机循环逻辑）
+  const indexPath = path.join(opts.outDir, 'index.json');
+  let index;
+  if (fs.existsSync(indexPath)) {
+    try {
+      index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    } catch { /* 忽略错误 */ }
+  }
+  if (!index || index.mode !== 'tree-round-robin') {
+    index = {
+      generatedAt: new Date().toISOString(),
+      mode: 'tree-round-robin',
+      languages: ['native', 'en'],
+      limitPerCountry: opts.limit,
+      coordinates: false,
+      countries: {},
+    };
+  }
 
   for (const cc of countries) {
     const all = loadStreetGroups(db, cc);
-    const picked = pickStreetsSpreadByAdmin1(all, opts.limit);
-    assertNoDuplicateStreets(picked, cc);
+    const picked = pickStreetsRoundRobin(all, opts.limit);
 
-    const admin1Set = new Set(
-      picked.map((s) => s.admin1 || s.admin1Code || '').filter(Boolean)
-    );
+    const admin1Set = new Set(picked.map((s) => s.admin1 || s.admin1Code || '').filter(Boolean));
 
     const file = `${cc.toLowerCase()}.json`;
-    fs.writeFileSync(path.join(opts.outDir, file), JSON.stringify(picked), 'utf8');
+    const treeData = buildTreeJSON(picked);
+
+    fs.writeFileSync(path.join(opts.outDir, file), JSON.stringify(treeData, null, 2), 'utf8');
+
+    // 持续更新总引索
     index.countries[cc] = {
       file,
       streetCount: picked.length,
       totalInDb: all.length,
       admin1Count: admin1Set.size,
     };
-    console.log(
-      `${cc}: streets ${picked.length}/${all.length}, admin1=${admin1Set.size} -> ${file}`
-    );
+    fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), 'utf8');
+
+    console.log(`✅ ${cc}: 获取 ${picked.length}/${all.length} 条街, 散布在 ${admin1Set.size} 个州/省 -> ${file}`);
   }
 
-  fs.writeFileSync(
-    path.join(opts.outDir, 'index.json'),
-    JSON.stringify(index, null, 2),
-    'utf8'
-  );
   db.close();
-  console.log(`done: ${opts.outDir}`);
+  console.log(`🎯 导出完成，数据目录: ${opts.outDir}`);
 }
 
 main();
