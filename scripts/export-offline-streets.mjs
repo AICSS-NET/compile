@@ -1,11 +1,11 @@
 /**
  * 从 daimon3332/address 的 address.sqlite 导出离线街道 JSON
  *
- * 【重构优化版】
- * - 数据结构扁平改树形：Country -> Admin1 -> Locality -> District -> Street -> { postcode, range }
+ * 【重构优化版 v2 - 完整数据防丢失验证】
+ * - 数据结构扁平改树形：Country -> Admin1 -> Locality -> District -> Street -> { postcode, range, ... }
  * - 门牌号(houseNumbers) 压缩：按连续数字压缩合并（例如 [1,2,3,5] -> "1-3, 5"）
- * - 提取策略（Round-Robin）：限制单省最多1000条，单市最多100条；多省市轮流循环均匀抽取，直到总数达到 limit。
- * - 多次调用安全：支持循环更新追加同一份 index.json
+ * - 提取策略（Round-Robin）：限制单省最多1000条，单市最多100条；多省市轮流循环均匀抽取，缺额自动补足。
+ * - 多次调用安全：支持单机循环任务持续追加更新同一份 index.json
  */
 
 import fs from 'node:fs';
@@ -115,22 +115,24 @@ function listCountries(db) {
     .map((r) => r.c);
 }
 
-// 门牌号压缩合并核心逻辑 (例如: [1, 2, 3, 5, "12A"] -> "1-3, 5, 12A")
+// 核心：门牌号连续压缩合并 (例如: [1, 2, 3, 5, "12A"] -> "1-3, 5, 12A")
 function compressHouseNumbers(arr) {
   if (!arr || !arr.length) return "";
   const nums = [];
   const nonNums = [];
+  
   for (const val of arr) {
     const str = String(val).trim();
     if (!str) continue;
     const n = parseInt(str, 10);
-    // 判断是否是纯正的整数
+    // 判断是否是纯数字（防止 "12A" 变成 1 被错误压缩）
     if (String(n) === str) {
       nums.push(n);
     } else {
       nonNums.push(str);
     }
   }
+  
   nums.sort((a, b) => a - b);
   nonNums.sort((a, b) => a.localeCompare(b, 'und', { numeric: true }));
 
@@ -140,8 +142,8 @@ function compressHouseNumbers(arr) {
     let end = nums[0];
     for (let i = 1; i < nums.length; i++) {
       if (nums[i] === end + 1) {
-        end = nums[i];
-      } else if (nums[i] > end) { // 遇到不连续且不重复的
+        end = nums[i]; // 连续，拓展区间
+      } else if (nums[i] > end) { // 遇到断层
         ranges.push(start === end ? String(start) : `${start}-${end}`);
         start = nums[i];
         end = nums[i];
@@ -152,7 +154,7 @@ function compressHouseNumbers(arr) {
   return [...ranges, ...nonNums].join(', ');
 }
 
-// 三级水桶轮询抽样算法
+// 核心：三级水桶轮询抽样算法
 function pickStreetsRoundRobin(streets, limit) {
   const tree = new Map(); // admin1 -> Map(locality -> array of streets)
   for (const s of streets) {
@@ -175,13 +177,13 @@ function pickStreetsRoundRobin(streets, limit) {
     for (const loc of locKeys) {
       const locStreets = locMap.get(loc);
       shuffleInPlace(locStreets);
-      // 核心要求：单城市最大 100 条
+      // 限制 1：单城市最大 100 条（打散城市集中度）
       const capped = locStreets.slice(0, 100);
       a1Total += capped.length;
       localities.push({ key: loc, streets: capped });
     }
 
-    // 核心要求：单省份最大 1000 条
+    // 限制 2：单省份最大 1000 条（防止加州等超级大州吃光配额）
     if (a1Total > 1000) {
       let kept = 0;
       for (const locState of localities) {
@@ -210,7 +212,7 @@ function pickStreetsRoundRobin(streets, limit) {
   const seen = new Set();
   let progress = true;
 
-  // 开始抽牌：确保均匀分布在各个城市和省份，不够自动补足
+  // 开始抽牌轮询
   while (picked.length < limit && progress && pool.length > 0) {
     progress = false;
     for (let i = 0; i < pool.length; i++) {
@@ -220,7 +222,7 @@ function pickStreetsRoundRobin(streets, limit) {
 
       const locState = a1State.localities[a1State.locIdx];
 
-      // 找一条还没被选过的街道
+      // 拿取该城市中一条未见过的数据
       let street = null;
       while (locState.streets.length > 0) {
         const s = locState.streets.pop();
@@ -237,20 +239,18 @@ function pickStreetsRoundRobin(streets, limit) {
         progress = true;
       }
 
-      // 处理城市轮询游标
+      // 移动游标或剔除耗尽的城市
       if (locState.streets.length === 0) {
-        // 当前城市被抽干，剔除
         a1State.localities.splice(a1State.locIdx, 1);
         if (a1State.locIdx >= a1State.localities.length) {
-          a1State.locIdx = 0;
+          a1State.locIdx = 0; // Wrap around
         }
       } else {
-        // 下次抽同省的下一个城市
         a1State.locIdx = (a1State.locIdx + 1) % a1State.localities.length;
       }
     }
 
-    // 清理被抽干的省份
+    // 剔除耗尽的省份
     for (let i = pool.length - 1; i >= 0; i--) {
       if (pool[i].localities.length === 0) pool.splice(i, 1);
     }
@@ -286,11 +286,13 @@ function loadStreetGroups(db, countryCode) {
         admin1: row.admin1 || '',
         admin1Code: row.admin1_code || '',
         locality: row.locality || '',
+        postalLocality: row.postal_locality || '',
         district: row.district || '',
         postcode: row.postcode || '',
         street: row.street || '',
         nativeLanguage: row.native_language || '',
         houseNumbers: new Set(),
+        buildingNames: new Set(),
         propertyTypes: new Map(),
         bestQuality: -1,
       };
@@ -298,6 +300,9 @@ function loadStreetGroups(db, countryCode) {
     }
 
     g.houseNumbers.add(String(row.house_number).normalize('NFKC').trim());
+    
+    const bn = String(row.building_name || '').trim();
+    if (bn) g.buildingNames.add(bn);
 
     const pt = row.property_type || 'unknown';
     g.propertyTypes.set(pt, (g.propertyTypes.get(pt) || 0) + 1);
@@ -324,10 +329,12 @@ function loadStreetGroups(db, countryCode) {
       admin1: g.admin1,
       admin1Code: g.admin1Code,
       locality: g.locality,
+      postalLocality: g.postalLocality,
       district: g.district,
       postcode: g.postcode,
       street: g.street,
       houseNumbers: [...g.houseNumbers],
+      buildingNames: [...g.buildingNames].sort((a, b) => a.localeCompare(b, 'und')),
       propertyType: propertyType === 'unknown' ? '' : propertyType,
       nativeLanguage: g.nativeLanguage,
       address: g.addressVariants,
@@ -336,7 +343,7 @@ function loadStreetGroups(db, countryCode) {
   });
 }
 
-// 构建树形 JSON 对象
+// 核心：构建树形 JSON 对象 (按层级嵌套，彻底消除冗余)
 function buildTreeJSON(streets) {
   const tree = {};
   for (const s of streets) {
@@ -351,11 +358,12 @@ function buildTreeJSON(streets) {
     if (!tree[c][a1][loc]) tree[c][a1][loc] = {};
     if (!tree[c][a1][loc][dist]) tree[c][a1][loc][dist] = {};
 
-    // 处理同一条街在同个区下但 Postcode 不同的极小概率冲突
+    // 冲突防御：极小概率下同区同名街道但邮编不同
     if (tree[c][a1][loc][dist][streetName] && tree[c][a1][loc][dist][streetName].postcode !== s.postcode) {
       streetName = `${streetName} (zip:${s.postcode || 'null'})`;
     }
 
+    // 组装最终最精简的街道节点（类似原本 compact 的效果，过滤掉空字段）
     const node = {
       postcode: s.postcode || "",
       range: compressHouseNumbers(s.houseNumbers)
@@ -364,6 +372,8 @@ function buildTreeJSON(streets) {
     if (s.nativeLanguage) node.nativeLanguage = s.nativeLanguage;
     if (s.address) node.address = s.address;
     if (s.components) node.components = s.components;
+    if (s.postalLocality) node.postalLocality = s.postalLocality;
+    if (s.buildingNames && s.buildingNames.length > 0) node.buildingNames = s.buildingNames;
 
     tree[c][a1][loc][dist][streetName] = node;
   }
@@ -381,13 +391,13 @@ function main() {
   const db = openDb(opts.db);
   const countries = opts.countries?.length ? opts.countries : listCountries(db);
 
-  // 安全地读写 index.json（适配单机循环逻辑）
+  // 安全追加模式：读取并更新统一的 index.json
   const indexPath = path.join(opts.outDir, 'index.json');
   let index;
   if (fs.existsSync(indexPath)) {
     try {
       index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
-    } catch { /* 忽略错误 */ }
+    } catch { /* 忽略损坏 */ }
   }
   if (!index || index.mode !== 'tree-round-robin') {
     index = {
@@ -411,7 +421,7 @@ function main() {
 
     fs.writeFileSync(path.join(opts.outDir, file), JSON.stringify(treeData, null, 2), 'utf8');
 
-    // 持续更新总引索
+    // 实时更新当前国家的统计到主索引
     index.countries[cc] = {
       file,
       streetCount: picked.length,
@@ -420,11 +430,11 @@ function main() {
     };
     fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), 'utf8');
 
-    console.log(`✅ ${cc}: 获取 ${picked.length}/${all.length} 条街, 散布在 ${admin1Set.size} 个州/省 -> ${file}`);
+    console.log(`✅ ${cc}: 抽取 ${picked.length}/${all.length} 条真实街道, 均匀散布于 ${admin1Set.size} 个州/省 -> ${file}`);
   }
 
   db.close();
-  console.log(`🎯 导出完成，数据目录: ${opts.outDir}`);
+  console.log(`🎯 当前轮次导出结束，数据均在: ${opts.outDir}`);
 }
 
 main();
