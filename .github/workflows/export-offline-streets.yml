@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: '每国最多多少条不重复街道'
+        description: '每国最多抽样多少条不重复街道'
         required: true
         default: '300'
       countries:
-        description: '逗号分隔国家码，留空=跑默认列表'
+        description: '逗号分隔国家码，留空=跑全列表'
         required: false
         default: ''
       include_cn:
-        description: '是否包含 CN（需要 Secrets 配置高德/百度/腾讯 API Key）'
+        description: '是否包含 CN（需要 Secrets 对应高德/百度/腾讯 API Key）'
         type: boolean
         default: false
 
@@ -23,16 +23,12 @@ concurrency:
 env:
   NODE_VERSION: '24'
   ADDRESS_DATABASE_PATH: data/address.sqlite
-  ADDRESS_SYNC_TRANSLATION_ENABLED: 'false'
-  GOOGLE_TRANSLATION_ENABLED: 'false'
-  ADDRESS_SYNC_OVERTURE_BUILDINGS: 'true'
-  ADDRESS_SYNC_REQUIRE_RESIDENTIAL: 'true'
 
 jobs:
   collect-all:
-    name: Sync & Extract All Countries
+    name: Sync & Extract All Sequential
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 给予充足时间，由于不再是矩阵，全部在此循环内执行
+    timeout-minutes: 360
     steps:
       - name: Checkout self
         uses: actions/checkout@v4
@@ -72,6 +68,7 @@ jobs:
           .venv/bin/pip install -r server/sync/requirements.txt
 
           cp .env.example .env
+          # 注意：通过修改 MAX_RECORDS_PER_SHARD 为 2500，强制 ETL 提早结束同步，绝不拖泥带水
           {
             echo "ADDRESS_DATABASE_PATH=${ADDRESS_DATABASE_PATH}"
             echo "ADDRESS_DATA_ROOT=data"
@@ -79,8 +76,9 @@ jobs:
             echo "ADDRESS_SYNC_OVERTURE_BUILDINGS=true"
             echo "ADDRESS_SYNC_REQUIRE_RESIDENTIAL=true"
             echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false"
-            echo "ADDRESS_SYNC_MAX_RECORDS_PER_SHARD=50000"
-            echo "ADDRESS_SYNC_RECORDS_PER_LOCALITY=64"
+            echo "GOOGLE_TRANSLATION_ENABLED=false"
+            echo "ADDRESS_SYNC_MAX_RECORDS_PER_SHARD=2500"
+            echo "ADDRESS_SYNC_RECORDS_PER_LOCALITY=40"
           } >> .env
 
           mkdir -p data data/staging offline-addresses scripts
@@ -91,21 +89,21 @@ jobs:
             npm run data:catalog:import
           fi
 
-          # 替换为我们重构后强大的导出脚本
+          # 替换为我们重构后支持树形嵌套及断点续写的强悍导出脚本
           cp ../self/scripts/export-offline-streets.mjs scripts/export-offline-streets.mjs
 
       - name: Sequential Sync and Extract Loop
         working-directory: address
         env:
           PYTHON_BIN: ${{ github.workspace }}/address/.venv/bin/python
-          # 自动注入中国区需要的 API Keys (仅当传入 secrets 且 include_cn = true 时才起效)
+          # 只在当前 Step 注入中国区所需 Keys (安全合规)
           AMAP_API_KEY: ${{ secrets.AMAP_API_KEY }}
           BAIDU_API_KEY: ${{ secrets.BAIDU_API_KEY }}
           TENCENT_API_KEY: ${{ secrets.TENCENT_API_KEY }}
         run: |
           set -euo pipefail
           
-          # 1. 确定要跑的国家列表
+          # 解析目标国家列表
           INPUT="${{ github.event.inputs.countries }}"
           if [ -z "$INPUT" ]; then
             COUNTRIES="US CA MX GB DE FR IT ES NL RU HK TW JP KR SG VN TH PH MY IN AU TR SA BR NG ZA"
@@ -113,38 +111,34 @@ jobs:
             COUNTRIES=$(echo "$INPUT" | tr ',' ' ' | tr '[:lower:]' '[:upper:]')
           fi
 
-          # 如果勾选了 CN，直接拼接到国家列表中
+          # 判断并混入 CN
           if [ "${{ github.event.inputs.include_cn }}" == "true" ]; then
             COUNTRIES="$COUNTRIES CN"
           fi
 
-          # 去重并统一格式
           COUNTRIES=$(echo "$COUNTRIES" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+          echo "🚀 单机循环正式启动，涉及国家序列: $COUNTRIES"
 
-          echo "🚀 开始流水线，准备处理的国家列表: $COUNTRIES"
-
-          # 2. 单机循环执行
+          # 单机跑完所有国家的核心循环
           for CC in $COUNTRIES; do
             echo "::group::======== [ Processing $CC ] ========"
             
-            # 执行底层数据同步 (如果失败，仅输出警告并不阻断整个循环)
-            echo "📥 开始同步 $CC 地图数据..."
-            node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard "$CC" || echo "⚠️ ETL 同步失败: $CC，跳过。"
+            echo "📥 开始同步 $CC 真实地图数据 (由于设了 2500 阀值，速度将极快)..."
+            node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard "$CC" || echo "⚠️ ETL 同步失败: $CC，跳过处理。"
 
-            # 执行导出 (直接输出并累计写入到 offline-addresses 目录中)
-            echo "📤 开始抽样提取 $CC JSON 数据..."
+            echo "📤 开始进行 $CC 的水桶轮询树形去重提取..."
             node scripts/export-offline-streets.mjs \
               --db "${ADDRESS_DATABASE_PATH}" \
               --out offline-addresses \
               --limit "${{ github.event.inputs.limit || '300' }}" \
-              --countries "$CC" || echo "⚠️ 数据抽取失败: $CC，跳过。"
+              --countries "$CC" || echo "⚠️ 数据抽取失败: $CC，跳过处理。"
               
-            # 为防止大量国家的 staging 缓存挤爆硬盘，每处理完一个国家自动清空 staging
+            # 极限省空间：立刻清空缓存，防止 Runner 爆盘 (这也是单机跑容易被忽略的致命伤)
             rm -rf data/staging/*
             echo "::endgroup::"
           done
 
-      - name: Upload Finished offline-addresses
+      - name: Upload Final Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
