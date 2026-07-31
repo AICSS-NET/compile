@@ -25,6 +25,9 @@ env:
   ADDRESS_DATABASE_PATH: data/address.sqlite
   ADDRESS_SYNC_TRANSLATION_ENABLED: 'false'
   GOOGLE_TRANSLATION_ENABLED: 'false'
+  # 官方同步关键：必须开启，否则几乎全部因 missing_residential_evidence 被拒
+  ADDRESS_SYNC_OVERTURE_BUILDINGS: 'true'
+  ADDRESS_SYNC_REQUIRE_RESIDENTIAL: 'true'
 
 jobs:
   collect:
@@ -33,7 +36,7 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 2
       matrix:
         country:
           [US, CA, MX, GB, DE, FR, IT, ES, NL, RU, HK, TW, JP, KR, SG, VN, TH, PH, MY, IN, AU, TR, SA, BR, NG, ZA]
@@ -105,19 +108,36 @@ jobs:
           cp .env.example .env
           {
             echo "ADDRESS_DATABASE_PATH=${ADDRESS_DATABASE_PATH}"
+            echo "ADDRESS_DATA_ROOT=data"
+            echo "ADDRESS_SYNC_CACHE_DIR=data/staging"
+            echo "ADDRESS_SYNC_OVERTURE_BUILDINGS=true"
+            echo "ADDRESS_SYNC_REQUIRE_RESIDENTIAL=true"
             echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false"
             echo "GOOGLE_TRANSLATION_ENABLED=false"
+            echo "ADDRESS_SYNC_MAX_RECORDS_PER_SHARD=50000"
+            echo "ADDRESS_SYNC_RECORDS_PER_LOCALITY=64"
           } >> .env
-          mkdir -p data
+
+          mkdir -p data data/staging
           npm run db:migrate
+
+          # 行政区目录：减轻 invalid_administrative_hierarchy
+          npm run data:catalog
+          if [ -f .data-cache/catalog-seed.sql ]; then
+            npm run data:catalog:import
+          fi
 
       - name: Sync country
         if: steps.gate.outputs.run == 'true'
         working-directory: address
         env:
           ADDRESS_DATABASE_PATH: ${{ env.ADDRESS_DATABASE_PATH }}
-          # 上游 source-adapters.mjs 读取 PYTHON_BIN，避免用到 setup-python 的裸解释器
           PYTHON_BIN: ${{ github.workspace }}/address/.venv/bin/python
+          ADDRESS_SYNC_OVERTURE_BUILDINGS: 'true'
+          ADDRESS_SYNC_REQUIRE_RESIDENTIAL: 'true'
+          ADDRESS_SYNC_TRANSLATION_ENABLED: 'false'
+          ADDRESS_DATA_ROOT: data
+          ADDRESS_SYNC_CACHE_DIR: data/staging
         run: |
           set -euo pipefail
           VENV_PY="${{ github.workspace }}/address/.venv/bin/python"
@@ -175,6 +195,8 @@ jobs:
         working-directory: address
         env:
           PYTHON_BIN: ${{ github.workspace }}/address/.venv/bin/python
+          ADDRESS_SYNC_OVERTURE_BUILDINGS: 'true'
+          ADDRESS_SYNC_REQUIRE_RESIDENTIAL: 'true'
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -191,13 +213,21 @@ jobs:
           cp .env.example .env
           {
             echo "ADDRESS_DATABASE_PATH=data/address.sqlite"
+            echo "ADDRESS_DATA_ROOT=data"
+            echo "ADDRESS_SYNC_CACHE_DIR=data/staging"
+            echo "ADDRESS_SYNC_OVERTURE_BUILDINGS=true"
+            echo "ADDRESS_SYNC_REQUIRE_RESIDENTIAL=true"
             echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false"
             echo "AMAP_API_KEY=${{ secrets.AMAP_API_KEY }}"
             echo "BAIDU_API_KEY=${{ secrets.BAIDU_API_KEY }}"
             echo "TENCENT_API_KEY=${{ secrets.TENCENT_API_KEY }}"
           } >> .env
-          mkdir -p data scripts
+          mkdir -p data data/staging scripts
           npm run db:migrate
+          npm run data:catalog || true
+          if [ -f .data-cache/catalog-seed.sql ]; then
+            npm run data:catalog:import
+          fi
           node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard CN
           cp ../self/scripts/export-offline-streets.mjs scripts/export-offline-streets.mjs
           node scripts/export-offline-streets.mjs \
