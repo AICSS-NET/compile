@@ -73,6 +73,22 @@ jobs:
       - name: 拉取 onnxruntime v1.22.0 源码
         run: git clone --depth 1 --branch v1.22.0 https://github.com/microsoft/onnxruntime.git onnxruntime-src
 
+      # onnxruntime 自己的 cmake/deps.txt 里，eigen3 这个依赖是通过 GitLab 的
+      # "按 commit 打包 zip" 接口下载、再校验 SHA1 哈希的。但 GitLab 这个接口
+      # 生成的 zip 不是字节稳定的（同一个 commit 每次打包出来的 zip 内容可能
+      # 有细微差异，比如内部时间戳），会导致下载回来的文件哈希跟 onnxruntime
+      # 写死的预期值对不上，构建直接失败。这是 onnxruntime 项目自己反复被报过
+      # 的老问题（GitHub issue #18286、#26707 等，跨越好几年），不是我们配置的
+      # 问题，官方也没有根治，只能在用的时候自己绕过去。
+      # 解法：把"下载 zip + 校验哈希"换成"用 git 按 commit 拉取"——git clone
+      # 是靠 git 自己的对象哈希做完整性校验的，不会有"同一个 commit 打包出来的
+      # zip 内容不稳定"这个问题。CMake 的 FetchContent 本来就同时支持
+      # URL+URL_HASH 和 GIT_REPOSITORY+GIT_TAG 这两种互斥写法，语法上没问题；
+      # 但 gitlab.com 不在我这边沙盒环境的网络白名单里，这一步没能在本地实测，
+      # 是照着 CMake 官方文档 + 社区里对付这个 GitLab 老问题的通用解法改的。
+      - name: 修复 eigen3 依赖下载（GitLab 归档哈希不稳定的已知问题）
+        run: python3 ort/patch_eigen_cmake.py onnxruntime-src/cmake/external/eigen.cmake
+
       # 用官方脚本扫描 4 个模型文件，生成"实际用到哪些算子"的精简配置清单。
       - name: 生成算子精简清单
         run: |
