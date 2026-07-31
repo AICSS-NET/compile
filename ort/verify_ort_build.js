@@ -3,7 +3,7 @@
 // 不可靠——base64/wasm二进制里的字符串排布跟直觉不一样，容易假阳性/假阴性），
 // 而是拿官方的 onnxruntime-web JS 包装层（ort.wasm.min.mjs，跟线上 index.html
 // 里 importmap 用的是同一个版本），配上这次新编译出来的精简版
-// ort-wasm-simd-threaded.mjs/.wasm，去真实加载 4 个 PP-OCR 模型文件、
+// ort-wasm-simd-threaded.mjs/.wasm，去真实加载 PP-OCR 模型文件、
 // 各自跑一次推理——这是在验证"官方 JS 包装层 + 我们自己编译的底层 wasm"
 // 这套组合本身是否真的可行，而不是停留在理论推导。
 //
@@ -47,7 +47,15 @@ function concretizeDims(dims, fallback = 32) {
 
   // 指向这次新编译出来的 wasm/mjs（同目录下应该有 ort-wasm-simd-threaded.mjs
   // 和 ort-wasm-simd-threaded.wasm 这一对文件）。
-  ort.env.wasm.wasmPaths = distDir.endsWith("/") ? distDir : distDir + "/";
+  // 必须转成绝对路径：命令行传进来的 distDir 可能是 "dist" 这种相对路径，
+  // onnxruntime-web 内部会用动态 import() 去加载 wasm 伴生文件，而 Node 的
+  // ESM 加载器对不带 "./" 前缀的相对路径字符串，会当成 npm 包名去
+  // node_modules 里找——"dist" 找不到对应的包，就会报
+  // "Cannot find package 'dist'"（这个坑之前也在浏览器端的
+  // window.__OCR_VENDOR_BASE__ 上踩过一次，是同一类问题，这次换成 Node
+  // 环境又踩了一遍）。转成绝对路径之后就没有这个歧义了。
+  const absDistDir = path.resolve(distDir);
+  ort.env.wasm.wasmPaths = absDistDir.endsWith(path.sep) ? absDistDir : absDistDir + path.sep;
   // 跟 ocr-app.js 里 CONFIG.ortBackend 保持一致：固定纯 CPU wasm，不走 WebGPU。
   ort.env.wasm.numThreads = 1;
 
@@ -103,7 +111,7 @@ function concretizeDims(dims, fallback = 32) {
     console.error("\n❌ 至少一个模型推理失败，这次编译出来的精简版 wasm 不能用，不应该被当成正常产物发布。");
     process.exit(1);
   }
-  console.log("\n✅ 全部 4 个模型都能正常加载并完成推理，精简版 wasm 可用。");
+  console.log(`\n✅ 全部 ${onnxFiles.length} 个模型都能正常加载并完成推理，精简版 wasm 可用。`);
 })().catch((err) => {
   console.error("脚本本身出错:", err);
   process.exit(1);
