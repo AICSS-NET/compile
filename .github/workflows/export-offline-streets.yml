@@ -1,0 +1,224 @@
+name: Export offline streets
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: '每国最多多少条不重复街道'
+        required: true
+        default: '300'
+      countries:
+        description: '逗号分隔国家码，留空=跑矩阵全部（不含 CN）'
+        required: false
+        default: ''
+      include_cn:
+        description: '是否包含 CN（需 Secrets: AMAP_API_KEY 等）'
+        type: boolean
+        default: false
+
+concurrency:
+  group: export-offline-streets
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24'
+  ADDRESS_DATABASE_PATH: data/address.sqlite
+  ADDRESS_SYNC_TRANSLATION_ENABLED: 'false'
+  GOOGLE_TRANSLATION_ENABLED: 'false'
+
+jobs:
+  collect:
+    name: ${{ matrix.country }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        country:
+          [US, CA, MX, GB, DE, FR, IT, ES, NL, RU, HK, TW, JP, KR, SG, VN, TH, PH, MY, IN, AU, TR, SA, BR, NG, ZA]
+
+    steps:
+      - name: Filter
+        id: gate
+        shell: bash
+        run: |
+          INPUT="${{ github.event.inputs.countries }}"
+          CC="${{ matrix.country }}"
+          if [ -z "$INPUT" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "$INPUT" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:lower:]' '[:upper:]' \
+            | grep -qx "$CC" && echo "run=true" >> "$GITHUB_OUTPUT" || echo "run=false" >> "$GITHUB_OUTPUT"
+
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: self
+
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: daimon3332/address
+          ref: main
+          path: address
+
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: address/package-lock.json
+
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - if: steps.gate.outputs.run == 'true'
+        name: Install
+        working-directory: address
+        run: |
+          sudo apt-get update && sudo apt-get install -y xz-utils
+          npm ci
+          python3 -m venv .venv
+          [ -f requirements.txt ] && .venv/bin/pip install -r requirements.txt || true
+          [ -f server/sync/requirements.txt ] && .venv/bin/pip install -r server/sync/requirements.txt || true
+          cp .env.example .env
+          echo "ADDRESS_DATABASE_PATH=${ADDRESS_DATABASE_PATH}" >> .env
+          echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false" >> .env
+          echo "GOOGLE_TRANSLATION_ENABLED=false" >> .env
+          mkdir -p data
+          npm run db:migrate
+
+      - if: steps.gate.outputs.run == 'true'
+        name: Sync
+        working-directory: address
+        env:
+          PATH: ${{ github.workspace }}/address/.venv/bin:/usr/bin:/bin
+        run: node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard "${{ matrix.country }}"
+
+      - if: steps.gate.outputs.run == 'true'
+        name: Export
+        working-directory: address
+        run: |
+          mkdir -p scripts
+          cp ../self/scripts/export-offline-streets.mjs scripts/export-offline-streets.mjs
+          node scripts/export-offline-streets.mjs \
+            --db "$ADDRESS_DATABASE_PATH" \
+            --out offline-part \
+            --limit "${{ github.event.inputs.limit || '300' }}" \
+            --countries "${{ matrix.country }}"
+
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: streets-${{ matrix.country }}
+          path: address/offline-part/
+          if-no-files-found: warn
+          retention-days: 14
+
+  collect-cn:
+    name: CN
+    if: ${{ github.event.inputs.include_cn == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: self
+      - uses: actions/checkout@v4
+        with:
+          repository: daimon3332/address
+          ref: main
+          path: address
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: address/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install + sync CN
+        working-directory: address
+        run: |
+          sudo apt-get update && sudo apt-get install -y xz-utils
+          npm ci
+          python3 -m venv .venv
+          cp .env.example .env
+          {
+            echo "ADDRESS_DATABASE_PATH=data/address.sqlite"
+            echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false"
+            echo "AMAP_API_KEY=${{ secrets.AMAP_API_KEY }}"
+            echo "BAIDU_API_KEY=${{ secrets.BAIDU_API_KEY }}"
+            echo "TENCENT_API_KEY=${{ secrets.TENCENT_API_KEY }}"
+          } >> .env
+          mkdir -p data scripts
+          npm run db:migrate
+          export PATH="$PWD/.venv/bin:$PATH"
+          node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard CN
+          cp ../self/scripts/export-offline-streets.mjs scripts/export-offline-streets.mjs
+          node scripts/export-offline-streets.mjs --db data/address.sqlite --out offline-part \
+            --limit "${{ github.event.inputs.limit || '300' }}" --countries CN
+      - uses: actions/upload-artifact@v4
+        with:
+          name: streets-CN
+          path: address/offline-part/
+          retention-days: 14
+
+  merge:
+    name: Merge
+    needs: [collect, collect-cn]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: streets-*
+          path: gathered
+          merge-multiple: true
+
+      - name: Build offline-addresses
+        run: |
+          mkdir -p offline-addresses
+          find gathered -type f -name '*.json' ! -name 'index.json' -print0 \
+            | while IFS= read -r -d '' f; do cp -f "$f" "offline-addresses/$(basename "$f")"; done
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const dir = 'offline-addresses';
+          const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json') && f !== 'index.json');
+          const countries = {};
+          for (const f of files) {
+            const rows = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+            if (!Array.isArray(rows)) throw new Error(f);
+            const seen = new Set();
+            for (const s of rows) {
+              const key = [s.country, s.admin1, s.locality, s.district, s.postcode, s.street]
+                .map((x) => String(x ?? '').trim().toLowerCase()).join('\u001f');
+              if (seen.has(key)) throw new Error('dup ' + f + ' ' + s.street);
+              seen.add(key);
+              if (!s.houseNumbers?.length) throw new Error('no houseNumbers ' + f);
+              // 不应再出现 zh-CN
+              if (s.address?.['zh-CN'] || s.components?.['zh-CN']) {
+                throw new Error('zh-CN leaked in ' + f);
+              }
+            }
+            const cc = (rows[0]?.country || f.replace(/\.json$/i, '')).toUpperCase();
+            countries[cc] = { file: f, streetCount: rows.length };
+          }
+          fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify({
+            generatedAt: new Date().toISOString(),
+            mode: 'street-dedup',
+            languages: ['native', 'en'],
+            limitPerCountry: Number(process.env.LIMIT || 300),
+            countries,
+          }, null, 2));
+          NODE
+        env:
+          LIMIT: ${{ github.event.inputs.limit || '300' }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offline-addresses
+          path: offline-addresses/
+          retention-days: 30
