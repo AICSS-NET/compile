@@ -56,16 +56,17 @@ jobs:
           .venv/bin/pip install -r server/sync/requirements.txt
 
           cp .env.example .env
-          # 注意：将 MAX_RECORDS_PER_SHARD 设定为 5000，确保去重过滤后绝对有 >300 条优质街道可供抽取
+          
+          # 【核心修复】：关闭建筑轮廓和住宅空间校验，否则网络空间计算会卡死！
           {
             echo "ADDRESS_DATABASE_PATH=${ADDRESS_DATABASE_PATH}"
             echo "ADDRESS_DATA_ROOT=data"
             echo "ADDRESS_SYNC_CACHE_DIR=data/staging"
-            echo "ADDRESS_SYNC_OVERTURE_BUILDINGS=true"
-            echo "ADDRESS_SYNC_REQUIRE_RESIDENTIAL=true"
+            echo "ADDRESS_SYNC_OVERTURE_BUILDINGS=false"
+            echo "ADDRESS_SYNC_REQUIRE_RESIDENTIAL=false"
             echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false"
             echo "GOOGLE_TRANSLATION_ENABLED=false"
-            echo "ADDRESS_SYNC_MAX_RECORDS_PER_SHARD=5000"
+            echo "ADDRESS_SYNC_MAX_RECORDS_PER_SHARD=3000"
             echo "ADDRESS_SYNC_RECORDS_PER_LOCALITY=40"
           } >> .env
 
@@ -96,7 +97,7 @@ jobs:
           for CC in $COUNTRIES; do
             echo "::group::======== [ Processing $CC ] ========"
             
-            echo "📥 开始同步 $CC 真实地图数据 (设了 5000 阀值，保证充足余量以供筛选)..."
+            echo "📥 开始同步 $CC 真实地图数据 (设了 3000 阀值，并已关闭建筑空间计算，速度将极快)..."
             node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard "$CC" || echo "⚠️ ETL 同步失败: $CC，跳过处理。"
 
             echo "📤 开始进行 $CC 的水桶轮询抽取 (强行固定300条)..."
