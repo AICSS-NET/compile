@@ -96,9 +96,11 @@ jobs:
 
           python3 -m venv .venv
           .venv/bin/pip install --upgrade pip
-          # 官方依赖：duckdb（Overture）+ osmium（Geofabrik）
           .venv/bin/pip install -r server/sync/requirements.txt
-          .venv/bin/python -c "import duckdb, osmium; print('python-ok', duckdb.__version__)"
+
+          VENV_PY="$PWD/.venv/bin/python"
+          test -x "$VENV_PY"
+          "$VENV_PY" -c "import duckdb, osmium; print('install-python-ok', duckdb.__version__)"
 
           cp .env.example .env
           {
@@ -113,13 +115,14 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         working-directory: address
         env:
-          # 必须让 child_process spawn 的 python3 指向 venv
-          PATH: ${{ github.workspace }}/address/.venv/bin:/usr/local/bin:/usr/bin:/bin
           ADDRESS_DATABASE_PATH: ${{ env.ADDRESS_DATABASE_PATH }}
+          # 上游 source-adapters.mjs 读取 PYTHON_BIN，避免用到 setup-python 的裸解释器
+          PYTHON_BIN: ${{ github.workspace }}/address/.venv/bin/python
         run: |
           set -euo pipefail
-          echo "python3=$(which python3)"
-          python3 -c "import duckdb, osmium; print('sync-python-ok', duckdb.__version__)"
+          VENV_PY="${{ github.workspace }}/address/.venv/bin/python"
+          test -x "$VENV_PY"
+          "$VENV_PY" -c "import duckdb, osmium; print('sync-python-ok', duckdb.__version__)"
           node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard "${{ matrix.country }}"
 
       - name: Export streets
@@ -171,7 +174,7 @@ jobs:
       - name: Install + sync CN
         working-directory: address
         env:
-          PATH: ${{ github.workspace }}/address/.venv/bin:/usr/local/bin:/usr/bin:/bin
+          PYTHON_BIN: ${{ github.workspace }}/address/.venv/bin/python
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -182,6 +185,9 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -r server/sync/requirements.txt
+          VENV_PY="$PWD/.venv/bin/python"
+          test -x "$VENV_PY"
+          "$VENV_PY" -c "import duckdb, osmium; print('cn-python-ok', duckdb.__version__)"
           cp .env.example .env
           {
             echo "ADDRESS_DATABASE_PATH=data/address.sqlite"
@@ -192,10 +198,6 @@ jobs:
           } >> .env
           mkdir -p data scripts
           npm run db:migrate
-          # 重新导出 PATH 含 venv（本 step 的 env 在 venv 创建前就固定了，这里显式 export）
-          export PATH="$PWD/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-          which python3
-          python3 -c "import duckdb, osmium; print('cn-python-ok', duckdb.__version__)"
           node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard CN
           cp ../self/scripts/export-offline-streets.mjs scripts/export-offline-streets.mjs
           node scripts/export-offline-streets.mjs \
