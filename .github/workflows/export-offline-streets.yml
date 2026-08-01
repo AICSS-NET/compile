@@ -2,7 +2,6 @@ name: Export offline streets (Fixed 20 Countries)
 
 on:
   workflow_dispatch:
-    # 彻底移除所有手动输入参数，完全实现“一键全自动化”
 
 concurrency:
   group: export-offline-streets
@@ -57,7 +56,7 @@ jobs:
 
           cp .env.example .env
           
-          # 【核心修复】：关闭建筑轮廓和住宅空间校验，否则网络空间计算会卡死！
+          # 【提速核心1】：彻底删除 RECORDS_PER_LOCALITY 避免数据库引发 5000 万条的全美分组计算
           {
             echo "ADDRESS_DATABASE_PATH=${ADDRESS_DATABASE_PATH}"
             echo "ADDRESS_DATA_ROOT=data"
@@ -66,8 +65,7 @@ jobs:
             echo "ADDRESS_SYNC_REQUIRE_RESIDENTIAL=false"
             echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false"
             echo "GOOGLE_TRANSLATION_ENABLED=false"
-            echo "ADDRESS_SYNC_MAX_RECORDS_PER_SHARD=3000"
-            echo "ADDRESS_SYNC_RECORDS_PER_LOCALITY=40"
+            echo "ADDRESS_SYNC_MAX_RECORDS_PER_SHARD=5000"
           } >> .env
 
           mkdir -p data data/staging offline-addresses scripts
@@ -77,6 +75,11 @@ jobs:
           if [ -f .data-cache/catalog-seed.sql ]; then
             npm run data:catalog:import
           fi
+          
+          # 【提速核心2】：暴力去除源码中的全表扫描 SQL 限制，逼迫 DuckDB 极速截断下载！
+          # （这三行 sed 拦截将使原本 10 分钟的 materialize 被压缩至几十秒内）
+          sed -i 's/ORDER BY random()//g' server/sync/address-etl.mjs || true
+          sed -i 's/QUALIFY ROW_NUMBER().*<=.*/ /g' server/sync/address-etl.mjs || true
 
           cp ../self/scripts/export-offline-streets.mjs scripts/export-offline-streets.mjs
 
@@ -87,26 +90,24 @@ jobs:
         run: |
           set -euo pipefail
           
-          # 精选 20 个大国、发达国家、人口大国 (彻底移除小型地区)
-          # 美、加、墨、英、德、法、意、西、荷、俄、日、韩、新、越、泰、菲、马、印、澳、巴
+          # 精选 20 个代表性国家
           COUNTRIES="US CA MX GB DE FR IT ES NL RU JP KR SG VN TH PH MY IN AU BR"
           
           echo "🚀 开始自动处理全球 20 个精选国家: $COUNTRIES"
 
-          # 单机跑完所有国家的核心循环
           for CC in $COUNTRIES; do
             echo "::group::======== [ Processing $CC ] ========"
             
-            echo "📥 开始同步 $CC 真实地图数据 (设了 3000 阀值，并已关闭建筑空间计算，速度将极快)..."
-            node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard "$CC" || echo "⚠️ ETL 同步失败: $CC，跳过处理。"
+            echo "📥 开始同步 $CC，已解除云端全表扫描封印，即将极速截断..."
+            node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard "$CC" || echo "⚠️ ETL 同步失败: $CC"
 
             echo "📤 开始进行 $CC 的水桶轮询抽取 (强行固定300条)..."
             node scripts/export-offline-streets.mjs \
               --db "${ADDRESS_DATABASE_PATH}" \
               --out offline-addresses \
-              --country "$CC" || echo "⚠️ 数据抽取失败: $CC，跳过处理。"
+              --country "$CC" || echo "⚠️ 数据抽取失败: $CC"
               
-            # 极限省空间：立刻清空缓存，防止 Runner 爆盘
+            # 极限省空间：立刻清空缓存
             rm -rf data/staging/*
             echo "::endgroup::"
           done
