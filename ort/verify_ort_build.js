@@ -72,7 +72,13 @@ function concretizeDims(dims, fallback = 32) {
     const modelName = path.relative(modelsDir, modelPath);
     console.log(`\n--- ${modelName} ---`);
     try {
-      const session = await ort.InferenceSession.create(modelPath, {
+      // 不直接传路径字符串——onnxruntime-web 内部会尝试把字符串参数当 URL 解析
+      // （new URL(...)），相对路径（比如 "models/xxx.onnx"）不是合法 URL，会
+      // 直接报 "Failed to parse URL from ..."（这是这条链路上第三次踩到"相对
+      // 路径喂给期望绝对路径/URL 的地方"这个坑了，干脆换成更彻底的办法：不传
+      // 路径，直接把文件读成二进制 Buffer 传进去，从根源上绕开路径解析）。
+      const modelBuffer = fs.readFileSync(modelPath);
+      const session = await ort.InferenceSession.create(modelBuffer, {
         executionProviders: ["wasm"],
       });
 
