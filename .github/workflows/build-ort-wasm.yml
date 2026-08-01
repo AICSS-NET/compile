@@ -1,13 +1,19 @@
-name: Build reduced-ops onnxruntime-web wasm (PP-OCRv6 tiny+small only)
+name: Build reduced-ops onnxruntime-web wasm (PP-OCRv6 small only)
 
 # 跟 opencv 那个 workflow 是同一套思路，但机制不同：onnxruntime 不是按"模块"分的，
 # 是按"算子"（Conv/MatMul/Softmax 这些神经网络计算单元）分的。这个 workflow 会：
-#   1. 下载 ocr-app.js 里实际配置的 4 个模型文件（tiny/small 各自的检测+识别模型）
-#   2. 用官方脚本扫描这 4 个模型，生成一份"这些模型实际用到哪些算子"的清单
+#   1. 下载 PP-OCRv6 small 的检测+识别 2 个模型文件
+#   2. 用官方脚本扫描这 2 个模型，生成一份"这些模型实际用到哪些算子"的清单
 #   3. 用这份清单编译 onnxruntime，只把用到的算子编译进去，其余全部裁掉
 #   4. 产出跟官方 ort-wasm-simd-threaded.mjs / .wasm 同名的两个文件，直接替换
 #      vendor 目录里的这两个文件即可（不需要改 ort.wasm.min.mjs，那个官方 JS
 #      包装层不用换，见下面校验步骤的说明）。
+#
+# !!! 重要：这次编译出来的 wasm 只保留了 small 模型需要的算子，tiny 模型用不了 !!!
+#   如果 ocr-app.js 里 CONFIG.modelPresets 还留着 "tiny" 这个选项、用户在页面上
+#   选了它，大概率会直接报错（缺算子）。换上这次的产物之前，记得同步去
+#   ocr-app.js 里把 "tiny" 这个选项从下拉框里去掉，或者干脆只留 "small" 一个
+#   选项，不然会出现"页面上还能选，选了就报错"的情况。
 #
 # 重要提醒：这个比 opencv 那次更容易踩坑，两个已知风险点：
 #   - PP-OCR 这类移动端模型经常用量化算子，官方有过 "精简算子 + WASM" 组合下
@@ -45,17 +51,15 @@ jobs:
       - name: 安装 Python 依赖（生成算子清单、算子精简编译都需要）
         run: pip install onnx flatbuffers
 
-      # 这 4 个模型文件的地址，是从 paddleocr-js@0.4.2 的源码里反编译出来的，
-      # 跟 ocr-app.js 里 CONFIG.modelPresets 配的 tiny/small 两套模型完全对应。
-      # 只分析其中一个模型会漏掉另一个模型需要的算子，切换模型档位时会直接报错，
-      # 所以 4 个都要下载、都要喂给下面的算子扫描脚本，取"并集"。
-      - name: 下载 PP-OCRv6 tiny/small 检测+识别模型
+      # 这 2 个模型文件的地址，是从 paddleocr-js@0.4.2 的源码里反编译出来的，
+      # 对应 ocr-app.js 里 CONFIG.modelPresets 的 "small" 这一档（det+rec 各一个）。
+      # 只编译 small 用到的算子，tiny 那一档会缺算子用不了——部署这次产物之前
+      # 记得同步去 ocr-app.js 里去掉 "tiny" 这个选项，见上面的重要提醒。
+      - name: 下载 PP-OCRv6 small 检测+识别模型
         run: |
           mkdir -p models
           cd models
           urls=(
-            "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_det_onnx_infer.tar"
-            "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_rec_onnx_infer.tar"
             "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_det_onnx_infer.tar"
             "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_onnx_infer.tar"
           )
@@ -89,7 +93,7 @@ jobs:
       - name: 修复 eigen3 依赖下载（GitLab 归档哈希不稳定的已知问题）
         run: python3 ort/patch_eigen_cmake.py onnxruntime-src/cmake/external/eigen.cmake
 
-      # 用官方脚本扫描 4 个模型文件，生成"实际用到哪些算子"的精简配置清单。
+      # 用官方脚本扫描 small 这 2 个模型文件，生成"实际用到哪些算子"的精简配置清单。
       - name: 生成算子精简清单
         run: |
           python3 onnxruntime-src/tools/python/create_reduced_build_config.py \
