@@ -35,6 +35,18 @@
  * （这正是这次排查发现的、workflow 里原有两行 sed 从一开始就没生效的原因）。
  * updateCountryPolicy() 是仓库自己维护、专门用来调整采集策略的公开函数，
  * 语义明确、带校验，不会引入无法预料的副作用。
+ *
+ * 关于按国家单独覆盖 target_count：
+ * server/sync/overture-export.py 里做建筑物空间匹配（residential/apartment 判定）时，
+ * 有一处写死的常量 `residential_grid_limit = min(24, residential_probe_limit)`——
+ * 不管候选池多大，全国范围内只会挑地址候选最密集的 24 个地理网格去做匹配，网格外的候选
+ * 一律因为拿不到 residentialSourceRecordId 被拒。这个限制对国土面积大、地址点分布分散
+ * 的国家（典型如 US）影响明显更大：SQL 层面把候选按州/省均匀打散后，大部分网格根本凑不够
+ * 密度进这 24 个，实测 US 在 target_count=900 时最终只有 119 条通过（约 13% 转化率），
+ * 远达不到导出脚本需要的 300 条。相邻的 CA 在同样 900 时也只是勉强够（418 条）。
+ * 这里允许通过 ADDRESS_SYNC_POLICY_TARGET_OVERRIDES 单独给这类国家设置更高的
+ * target_count，而不必为了照顾少数几个国家把全部 20 个国家的候选池、materialize
+ * 耗时一起抬高。
  */
 
 import { openDatabase } from '../server/database/sqlite.mjs';
@@ -42,13 +54,38 @@ import { updateCountryPolicy } from '../server/sync/address-policy.mjs';
 
 const databasePath = process.env.ADDRESS_DATABASE_PATH || 'data/address.sqlite';
 
-const targetCount = Number(process.env.ADDRESS_SYNC_POLICY_TARGET_COUNT || 900);
-if (!Number.isInteger(targetCount) || targetCount < 1) {
+const defaultTargetCount = Number(process.env.ADDRESS_SYNC_POLICY_TARGET_COUNT || 900);
+if (!Number.isInteger(defaultTargetCount) || defaultTargetCount < 1) {
   console.error(
     `[policy-seed] 非法的 ADDRESS_SYNC_POLICY_TARGET_COUNT: ${process.env.ADDRESS_SYNC_POLICY_TARGET_COUNT}`
   );
   process.exit(1);
 }
+
+// 按国家覆盖 target_count，JSON 格式，例如 '{"US":4500,"RU":4500}'。
+// 没有在这里列出的国家，一律使用上面的 defaultTargetCount。
+let targetOverrides = {};
+const overridesRaw = process.env.ADDRESS_SYNC_POLICY_TARGET_OVERRIDES;
+if (overridesRaw && overridesRaw.trim()) {
+  try {
+    const parsed = JSON.parse(overridesRaw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('必须是一个 { 国家代码: 数字 } 形式的 JSON 对象');
+    }
+    for (const [countryCode, value] of Object.entries(parsed)) {
+      const numeric = Number(value);
+      if (!Number.isInteger(numeric) || numeric < 1) {
+        throw new Error(`国家 ${countryCode} 的覆盖值不是正整数: ${value}`);
+      }
+      targetOverrides[countryCode.trim().toUpperCase()] = numeric;
+    }
+  } catch (error) {
+    console.error(`[policy-seed] 非法的 ADDRESS_SYNC_POLICY_TARGET_OVERRIDES: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+const resolveTargetCount = (countryCode) => targetOverrides[countryCode] ?? defaultTargetCount;
 
 // 国家列表统一从 COUNTRIES 环境变量读取（workflow 顶层 env 里定义），
 // 和 "Process 20 Fixed Countries Loop" 步骤共用同一份列表，避免两处列表
@@ -69,10 +106,13 @@ async function main() {
   const failures = [];
   try {
     for (const countryCode of countries) {
+      const targetCount = resolveTargetCount(countryCode);
+      const overridden = Object.hasOwn(targetOverrides, countryCode);
       try {
         const updated = await updateCountryPolicy(database, countryCode, { targetCount });
         console.log(
-          `[policy-seed] ${countryCode}: target_count -> ${updated.targetCount} ` +
+          `[policy-seed] ${countryCode}: target_count -> ${updated.targetCount}` +
+            `${overridden ? ' (按国家单独覆盖)' : ' (默认值)'} ` +
             `(level limits 保持不变: [${updated.level1Limit},${updated.level2Limit},${updated.level3Limit},${updated.level4Limit}])`
         );
       } catch (error) {
@@ -92,7 +132,10 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`[policy-seed] 完成，共处理 ${countries.length} 个国家，target_count 统一设为 ${targetCount}。`);
+  console.log(
+    `[policy-seed] 完成，共处理 ${countries.length} 个国家，默认 target_count=${defaultTargetCount}，` +
+      `其中 ${Object.keys(targetOverrides).length} 个国家使用了单独覆盖值。`
+  );
 }
 
 main().catch((error) => {
