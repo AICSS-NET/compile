@@ -1,0 +1,64 @@
+name: Export offline streets (GeoNames + Overpass)
+
+on:
+  workflow_dispatch:
+    inputs:
+      countries:
+        description: '国家代码列表,逗号分隔(留空则用默认的20个国家)'
+        required: false
+        default: ''
+      cities_per_country:
+        description: '每个国家采集人口最多的几个城市'
+        required: false
+        default: '6'
+      limit_per_country:
+        description: '每个国家最终导出的街道条数上限'
+        required: false
+        default: '300'
+
+concurrency:
+  group: export-offline-streets
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  collect:
+    name: Collect streets via GeoNames + Overpass
+    runs-on: ubuntu-latest
+    # 不再需要等 DuckDB 扫描远程 Parquet，20 个国家 × 6 个城市 = 120 次轻量 Overpass
+    # 查询，配合限速，正常情况下应该在半小时以内跑完，留一些余量。
+    timeout-minutes: 60
+    steps:
+      - name: Checkout self
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Collect streets
+        run: |
+          set -euo pipefail
+          mkdir -p offline-addresses
+
+          ARGS="--out offline-addresses"
+          if [ -n "${{ inputs.countries }}" ]; then
+            ARGS="$ARGS --countries ${{ inputs.countries }}"
+          fi
+          ARGS="$ARGS --cities-per-country ${{ inputs.cities_per_country }}"
+          ARGS="$ARGS --limit ${{ inputs.limit_per_country }}"
+
+          echo "🚀 node scripts/collect-streets-overpass.mjs $ARGS"
+          node scripts/collect-streets-overpass.mjs $ARGS
+
+      - name: Upload Final Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-addresses
+          path: offline-addresses/
+          if-no-files-found: warn
+          retention-days: 30

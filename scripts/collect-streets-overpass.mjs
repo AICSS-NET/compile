@@ -46,9 +46,15 @@ const GEONAMES_CITIES_URL = 'https://download.geonames.org/export/dump/cities150
 const GEONAMES_ADMIN1_URL = 'https://download.geonames.org/export/dump/admin1CodesASCII.txt';
 
 // 多个 Overpass 公共实例，主实例失败/被限流时按顺序尝试下一个。
+//
+// 关于 HTTP 406：这不是限流也不是查询语法问题。2025-2026 年 overpass-api.de 主实例
+// 因为被大量 AI 爬虫流量冲击，加了一套"请求特征"过滤，命中了就直接拒绝——对同一台服务器
+// 重试拿到的是一模一样的拒绝，唯一有效的办法是换一台服务器（见下面 queryOverpassWithRetry
+// 里 406 分支的处理：不重试同一个 endpoint，直接跳下一个）。这里多放一个镜像兜底。
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
 ];
 
 const DEFAULT_COUNTRIES = [
@@ -66,8 +72,14 @@ function parseArgs(argv) {
     limit: 300,
     minStreetsWarn: 5,
     workDir: '.geonames-cache',
-    overpassDelayMs: 1500,
+    overpassDelayMs: 2000,
     radiusMetersOverride: null,
+    // 单次查询里，Overpass 最多返回多少条"道路"/多少个"带门牌号的地址点"。
+    // 之前没设上限，纽约一个城市就采回 7268 条街道、墨西哥城 25166 条——
+    // 远超实际需要（每城市最终只要 limit/citiesPerCountry 条左右），
+    // 白白拖慢查询、加重公共 Overpass 服务器负担，还更容易触发限流/反爬拒绝。
+    maxRoadsPerCity: 600,
+    maxAddrPointsPerCity: 4000,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -79,6 +91,8 @@ function parseArgs(argv) {
     else if (a === '--work-dir') out.workDir = argv[++i];
     else if (a === '--overpass-delay-ms') out.overpassDelayMs = Number(argv[++i]);
     else if (a === '--radius-m') out.radiusMetersOverride = Number(argv[++i]);
+    else if (a === '--max-roads-per-city') out.maxRoadsPerCity = Number(argv[++i]);
+    else if (a === '--max-addr-points-per-city') out.maxAddrPointsPerCity = Number(argv[++i]);
   }
   return out;
 }
@@ -228,24 +242,34 @@ function loadCitiesForCountries(citiesTxt, admin1Map, countries, citiesPerCountr
 
 // 根据人口规模给一个大致合理的查询半径（米），城市越大范围越大。纯粹是经验取值，
 // 追求的是"覆盖到市中心主要路网"而不是精确的行政边界，简单可靠优先。
+// （半径比第一版略微调小了一档：现在有下面 out 数量上限兜底控制返回体积，
+// 半径主要影响服务器端要扫描的范围大小，适当缩小能降低超大城市查询超时的概率）
 function radiusForPopulation(population, override) {
   if (override) return override;
-  if (population >= 5_000_000) return 15_000;
-  if (population >= 1_000_000) return 10_000;
-  if (population >= 300_000) return 7_000;
+  if (population >= 5_000_000) return 10_000;
+  if (population >= 1_000_000) return 8_000;
+  if (population >= 300_000) return 6_000;
   return 5_000;
 }
 
 // ============================== 第二步：Overpass 查询 & 解析 ==============================
 
-function buildOverpassQuery(lat, lon, radiusMeters) {
-  return `[out:json][timeout:90];
-(
-  way(around:${radiusMeters},${lat},${lon})["highway"]["name"];
-  node(around:${radiusMeters},${lat},${lon})["addr:housenumber"]["addr:street"];
-  way(around:${radiusMeters},${lat},${lon})["addr:housenumber"]["addr:street"];
-);
-out tags center;`;
+// 只保留真正可以作为邮寄地址的道路类型，排除自行车道/人行道/台阶/小径这些——
+// 之前没做这个过滤，us.json 里能看到 "Williamsburg Bridge Bike Path" 这种明显不是
+// 邮寄地址的东西混进了结果。
+const ADDRESSABLE_HIGHWAY_TYPES = 'residential|living_street|unclassified|tertiary|secondary|primary|road';
+
+function buildOverpassQuery(lat, lon, radiusMeters, { maxRoads, maxAddrPoints }) {
+  // 用命名集合(->.roads 等)把"道路"和"带门牌号的地址点"分开统计、分开限流：
+  // 如果只在最后统一用一个 out 数量上限，道路数据量一大就会把地址点的配额挤占掉，
+  // 导致门牌号证据反而采不到。分开限流之后两者互不影响。
+  return `[out:json][timeout:60];
+way(around:${radiusMeters},${lat},${lon})["highway"~"^(${ADDRESSABLE_HIGHWAY_TYPES})$"]["name"]->.roads;
+node(around:${radiusMeters},${lat},${lon})["addr:housenumber"]["addr:street"]->.addrNodes;
+way(around:${radiusMeters},${lat},${lon})["addr:housenumber"]["addr:street"]->.addrWays;
+.roads out tags center ${maxRoads};
+.addrNodes out tags ${maxAddrPoints};
+.addrWays out tags center ${Math.round(maxAddrPoints / 2)};`;
 }
 
 async function queryOverpassWithRetry(query, { maxAttemptsPerEndpoint = 2 } = {}) {
@@ -262,9 +286,16 @@ async function queryOverpassWithRetry(query, { maxAttemptsPerEndpoint = 2 } = {}
           body: query,
         });
 
+        if (response.status === 406) {
+          // 406 不是限流，是服务器把这次请求判定成"疑似爬虫"直接拒绝——对同一台服务器
+          // 重试拿到的会是一模一样的拒绝，浪费时间也没用，直接换下一个 endpoint。
+          lastError = new Error('HTTP 406');
+          console.warn(`[overpass] ${endpoint} 返回 406（判定为疑似爬虫请求），跳过重试，直接换下一个镜像`);
+          break;
+        }
         if (response.status === 429 || response.status === 504) {
-          // 被限流或超时，退避后重试同一个实例，不行再换下一个实例
-          const backoffMs = 2000 * attempt;
+          // 429/504 才是真的限流/服务器端超时，退避后重试同一个实例，不行再换下一个实例
+          const backoffMs = 3000 * attempt;
           console.warn(`[overpass] ${endpoint} 返回 ${response.status}，${backoffMs}ms 后重试`);
           await sleep(backoffMs);
           continue;
@@ -313,8 +344,19 @@ function extractStreetsFromElements(elements) {
     if (!street || !houseNumber) continue;
     const entry = ensure(street);
     if (!entry) continue;
-    entry.houseNumbers.add(houseNumber);
-    if (el.tags?.['addr:postcode']) entry.postcodes.add(el.tags['addr:postcode']);
+
+    // OSM 里偶尔会出现一个字段填了多个值、用分号隔开的情况（比如某个地址正好横跨
+    // 两个邮编分区，被标注成 "90013;90015"）。之前直接把整串当一个邮编存了进去，
+    // 这里按分号拆开，当成多个独立候选。
+    for (const hn of String(houseNumber).split(';').map((s) => s.trim()).filter(Boolean)) {
+      entry.houseNumbers.add(hn);
+    }
+    const postcodeRaw = el.tags?.['addr:postcode'];
+    if (postcodeRaw) {
+      for (const pc of String(postcodeRaw).split(';').map((s) => s.trim()).filter(Boolean)) {
+        entry.postcodes.add(pc);
+      }
+    }
   }
 
   return streets;
@@ -324,8 +366,16 @@ function extractStreetsFromElements(elements) {
 
 function pickStreetsRoundRobin(citiesWithStreets, limit) {
   // citiesWithStreets: [{ city, admin1, streets: [{name, houseNumbers, postcodes}, ...] }, ...]
+  //
+  // 目标是生成"能拼出真实地址"的数据，所以每个城市内部优先消耗有门牌号证据的街道
+  // （houseNumbers 非空），纯路名、没有任何门牌号数据的街道排到后面，只有前者不够填满
+  // 该城市的配额时才会被用上。两组内部各自打乱顺序，避免总是选到同一批。
   const pool = citiesWithStreets
-    .map((c) => ({ ...c, streets: shuffleInPlace([...c.streets]), idx: 0 }))
+    .map((c) => {
+      const addressed = shuffleInPlace(c.streets.filter((s) => s.houseNumbers.size > 0));
+      const nameOnly = shuffleInPlace(c.streets.filter((s) => s.houseNumbers.size === 0));
+      return { ...c, streets: [...addressed, ...nameOnly], idx: 0 };
+    })
     .filter((c) => c.streets.length > 0);
 
   const picked = [];
@@ -353,13 +403,26 @@ function buildTreeJSON(countryCode, picked) {
     const district = '-'; // Overpass 半径查询不返回行政区划细分，统一填 '-'
 
     root[a1] ??= {};
-    root[a1][city] ??= { _meta: { phonePrefix: generateCityPhonePrefix(countryCode, city), postcodes: [] } };
+    root[a1][city] ??= {
+      _meta: {
+        // 注意：phonePrefix 是根据国家+城市名生成的固定哈希前缀，纯粹为了让生成出来的
+        // 电话号码"看起来合理"，不是真实的电信局分配的区号，不能当真实数据使用。
+        phonePrefix: generateCityPhonePrefix(countryCode, city),
+        postcodes: [],
+      },
+    };
     root[a1][city][district] ??= {};
 
     const postcodeList = [...s.postcodes];
+    const houseNumberList = [...s.houseNumbers];
     root[a1][city][district][s.rawName] = {
       postcode: postcodeList[0] || '',
-      range: compressHouseNumbers([...s.houseNumbers]),
+      range: compressHouseNumbers(houseNumberList),
+      // 原始门牌号数组，未压缩。生成具体地址时直接从这里随机取一个真实门牌号即可，
+      // 不需要反解析 range 那个压缩字符串（"1-3, 5" 这种格式）。为空说明这条街
+      // 在采集范围内没有找到任何门牌号标注，生成地址时需要自行决定兜底策略
+      // （比如随机造一个 1-200 的数字，但那就是纯虚构的了，不是真实数据）。
+      houseNumbers: houseNumberList,
     };
 
     for (const pc of postcodeList) {
@@ -414,7 +477,10 @@ async function main() {
       const radius = radiusForPopulation(city.population, opts.radiusMetersOverride);
       console.log(`[overpass] ${cc} / ${city.name} (人口 ${city.population.toLocaleString()}, 半径 ${radius}m) 查询中 ...`);
       try {
-        const query = buildOverpassQuery(city.lat, city.lon, radius);
+        const query = buildOverpassQuery(city.lat, city.lon, radius, {
+          maxRoads: opts.maxRoadsPerCity,
+          maxAddrPoints: opts.maxAddrPointsPerCity,
+        });
         const elements = await queryOverpassWithRetry(query);
         const streetsMap = extractStreetsFromElements(elements);
         const streets = [...streetsMap.values()];
