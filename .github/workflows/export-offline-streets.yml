@@ -70,7 +70,16 @@ jobs:
             echo "ADDRESS_DATABASE_PATH=${ADDRESS_DATABASE_PATH}"
             echo "ADDRESS_DATA_ROOT=data"
             echo "ADDRESS_SYNC_CACHE_DIR=data/staging"
-            echo "ADDRESS_SYNC_OVERTURE_BUILDINGS=false"
+            # 必须是 true：server/sync/sqlite-address-importer.mjs 里有一条硬性质量门，
+            # 要求每条记录的 property_type 必须是 residential/apartment，且带有
+            # residentialSourceRecordId，而这个字段只有在 Overture 建筑物数据参与空间
+            # 匹配（ST_Intersects）之后才会被打上。一旦这里是 false，
+            # server/sync/overture-export.py 收到的建筑物资产列表永远是空数组，
+            # 只能走它的 fallback_query，里面把 property_type 写死成 'unknown'，
+            # 导致 100% 的候选记录都会被判定为 missing_residential_evidence 而拒绝——
+            # 不管等多久、候选数据抽多少条，这个国家永远是 0 条通过。这不是性能开关，
+            # 是决定这条流水线有没有输出的开关。
+            echo "ADDRESS_SYNC_OVERTURE_BUILDINGS=true"
             echo "ADDRESS_SYNC_REQUIRE_RESIDENTIAL=false"
             echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false"
             echo "GOOGLE_TRANSLATION_ENABLED=false"
