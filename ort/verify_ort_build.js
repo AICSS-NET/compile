@@ -108,7 +108,7 @@ function concretizeDims(dims, fallback = 32) {
       console.error(`  ❌ 失败: ${err.message}`);
       if (/not implemented|not supported|no kernel|not found/i.test(err.message)) {
         console.error("     看起来像是算子精简裁过头了——某个这个模型需要的算子" +
-          "没有被包含进精简清单，需要检查 ops_config.txt 生成步骤是否真的覆盖到了这个模型。");
+          "没有被包含进精简清单，需要检查 models/required_operators.config 生成步骤是否真的覆盖到了这个模型（也可能是图优化融合出的算子没被扫描到，参考 FusedConv 那个已知问题）。");
       }
     }
   }
