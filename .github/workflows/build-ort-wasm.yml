@@ -93,15 +93,32 @@ jobs:
       - name: 修复 eigen3 依赖下载（GitLab 归档哈希不稳定的已知问题）
         run: python3 ort/patch_eigen_cmake.py onnxruntime-src/cmake/external/eigen.cmake
 
-      # 用官方脚本扫描 small 这 2 个模型文件，生成"实际用到哪些算子"的精简配置清单。
-      - name: 生成算子精简清单
+      # 之前用 create_reduced_build_config.py 直接扫描 .onnx 文件，只能扫到模型
+      # 文件里原本就写着的算子——但 onnxruntime 在真正建 session 时，会用自己的
+      # 图优化器把 Conv+Relu 这类相邻节点融合成内部专用的 FusedConv 算子（这是
+      # 官方文档里"extended 优化等级"明确写到的行为：
+      # https://onnxruntime.ai/docs/performance/mobile-performance-tuning.html）。
+      # FusedConv 不在原始 .onnx 文件里，纯静态扫描永远扫不到它，实测已经踩到
+      # 报错 "Failed to find kernel for com.microsoft.FusedConv"。
+      #
+      # 官方对付这个问题的正确工具是 convert_onnx_models_to_ort.py（不是
+      # create_reduced_build_config.py）——它会先把 .onnx 转换成 .ort 格式
+      # （转换过程中真的跑一遍图优化，把 FusedConv 这类融合结果固化进去），
+      # 再从转换后的 .ort 模型里提取算子清单，这样生成的清单才会包含 FusedConv。
+      # 注意这一步只是为了拿到"正确、完整"的算子清单，不代表最终产物要求用
+      # .ort 格式模型——后面编译 wasm 时不加 --minimal_build，paddleocr-js
+      # 还是照常加载标准 .onnx 文件，跟之前的策略一致。
+      #
+      # --optimization_style 选 Fixed 而不是 Runtime：官方文档原话是"NNAPI 或
+      # CoreML 场景用 Runtime，其它场景用 Fixed"，我们是纯 CPU wasm，不涉及
+      # NNAPI/CoreML，用 Fixed。
+      - name: 生成算子精简清单（用 convert_onnx_models_to_ort.py，能覆盖图优化融合出的算子）
         run: |
-          python3 onnxruntime-src/tools/python/create_reduced_build_config.py \
-            --format ONNX \
+          python3 onnxruntime-src/tools/python/convert_onnx_models_to_ort.py \
             models \
-            ops_config.txt
+            --optimization_style Fixed
           echo "生成的算子清单："
-          cat ops_config.txt
+          cat models/required_operators.config
 
       - name: 安装最新版 Emscripten 工具链
         run: |
@@ -129,7 +146,7 @@ jobs:
             --disable_wasm_exception_catching \
             --disable_rtti \
             --parallel \
-            --include_ops_by_config "$(pwd)/../ops_config.txt" \
+            --include_ops_by_config "$(pwd)/../models/required_operators.config" \
             --enable_reduced_operator_type_support \
             --allow_running_as_root \
             > ../build_full.log 2>&1
