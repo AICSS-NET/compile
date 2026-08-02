@@ -20,6 +20,13 @@ env:
   # target_count —— 这才是真正控制 materialize 阶段要采集/排序/落盘多少行数据的开关。
   # 详见 scripts/set-country-policies.mjs 顶部注释。
   ADDRESS_SYNC_POLICY_TARGET_COUNT: '900'
+  # 按国家单独覆盖 target_count（JSON）。
+  # overture-export.py 里的建筑物空间匹配只在全国最密集的 24 个地理网格内进行，
+  # 网格外的候选一律无法通过质量门。这对国土面积大、地址点分布分散的国家影响明显更大：
+  # 实测 US 在 target_count=900 时最终只有 119 条通过（约 13% 转化率），
+  # 远不够导出脚本需要的 300 条，所以先按同样的转化率倒推给它更大的候选池。
+  # 后续如果发现 RU / AU / BR / IN 等同类国家也有同样的问题，照这个格式继续加进来即可。
+  ADDRESS_SYNC_POLICY_TARGET_OVERRIDES: '{"US":4500}'
 
 jobs:
   collect-all:
