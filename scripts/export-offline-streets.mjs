@@ -1,12 +1,18 @@
 /**
  * 从 daimon3332/address 的 address.sqlite 导出离线街道 JSON
  *
- * 【重构优化版 v3 - 20国定制混合版】
+ * 【重构优化版 v4 - 20国定制混合版】
  * - 强制固定输出限制：每个国家绝对抽取 300 条数据。
  * - 数据结构扁平改树形：Country -> Admin1 -> Locality -> District -> Street -> { postcode, range, ... }
  * - 特性增强：在 Locality(城市) 层级自动注入 _meta 元数据，包含生成的固定电话区号前缀以及该市所有邮编。
  * - 门牌号(houseNumbers) 压缩：按连续数字压缩合并（例如 [1,2,3,5] -> "1-3, 5"）
- * - 提取策略（Round-Robin）：多省市轮流循环均匀抽取，缺额自动补足，保证分布极其均匀。
+ * - 提取策略（Round-Robin）：多省市轮流循环抽取，缺额自动补足。
+ * - v4 新增：只集中采集人口密集的主要城市，人口少（街道组数量太少）的小城市直接跳过不采集。
+ *   数据库里没有真实人口字段，这里用"该城市在候选池里的街道组数量"作为城市规模的代理指标——
+ *   城市地址点越密集，通常这个数字也越大，不是完美的人口数据，但方向是对的。
+ *   仍然保留按省/州轮询的框架（否则大城市集中的一两个省会把配额全部吃光，变成只采一个都会区），
+ *   但省/州内部不再随机打散城市顺序，而是优先保留规模最大的若干个城市，见下面
+ *   MIN_STREETS_PER_LOCALITY / MAX_LOCALITIES_PER_ADMIN1 两个常量。
  */
 
 import fs from 'node:fs';
@@ -15,6 +21,15 @@ import { DatabaseSync } from 'node:sqlite';
 
 // 固定需求：不管什么情况，每个国家固定抽取 300 条
 const FIXED_LIMIT = 300;
+
+// v4 新增：只采集人口密集的主要城市。
+// 一个城市在候选池里的街道组数量低于这个阈值，视为小城市/数据太稀疏，直接跳过不采集。
+const MIN_STREETS_PER_LOCALITY = 3;
+// 每个省/州最多保留规模最大的这么多个城市，其余哪怕过了上面的最小阈值也不要，
+// 从而把抽样集中在真正的主要城市上，而不是把配额分散给一大堆小地方。
+const MAX_LOCALITIES_PER_ADMIN1 = 5;
+// 单城市抽取上限：既然现在只挑大城市了，允许它们比以前贡献更多条数据。
+const MAX_STREETS_PER_LOCALITY = 30;
 
 function parseArgs(argv) {
   const out = {
@@ -182,7 +197,7 @@ function compressHouseNumbers(arr) {
   return [...ranges, ...nonNums].join(', ');
 }
 
-// 核心：三级水桶轮询抽样算法
+// 核心：省/州内只保留人口密集的主要城市 + 三级水桶轮询抽样算法
 function pickStreetsRoundRobin(streets, limit) {
   const tree = new Map(); // admin1 -> Map(locality -> array of streets)
   for (const s of streets) {
@@ -197,21 +212,28 @@ function pickStreetsRoundRobin(streets, limit) {
 
   const pool = [];
   for (const [a1, locMap] of tree.entries()) {
-    const localities = [];
-    const locKeys = Array.from(locMap.keys());
-    shuffleInPlace(locKeys);
+    // v4：不再随机打散城市顺序，改成按"街道组数量"（城市规模的代理指标）从大到小排序，
+    // 优先保留规模最大的主要城市。
+    const rankedLocalities = Array.from(locMap.entries())
+      // 限制 A：街道组数量低于 MIN_STREETS_PER_LOCALITY 的小城市直接跳过，不采集。
+      .filter(([, locStreets]) => locStreets.length >= MIN_STREETS_PER_LOCALITY)
+      .sort((left, right) => right[1].length - left[1].length)
+      // 限制 B：每个省/州只保留规模最大的 MAX_LOCALITIES_PER_ADMIN1 个城市。
+      .slice(0, MAX_LOCALITIES_PER_ADMIN1);
 
+    const localities = [];
     let a1Total = 0;
-    for (const loc of locKeys) {
-      const locStreets = locMap.get(loc);
-      shuffleInPlace(locStreets);
-      // 限制 1：单城市最大 100 条（打散城市集中度）
-      const capped = locStreets.slice(0, 100);
+    for (const [loc, locStreetsRaw] of rankedLocalities) {
+      const locStreets = [...locStreetsRaw];
+      shuffleInPlace(locStreets); // 城市内部具体抽哪几条街道，仍然随机，只是不再随机选城市
+      // 限制 C：单城市最大 MAX_STREETS_PER_LOCALITY 条
+      const capped = locStreets.slice(0, MAX_STREETS_PER_LOCALITY);
       a1Total += capped.length;
       localities.push({ key: loc, streets: capped });
     }
 
-    // 限制 2：单省份最大 1000 条（防止加州等超级大州吃光配额）
+    // 限制 D：单省份最大 1000 条（防止加州等超级大州吃光配额；
+    // 现在每省最多 5 个城市 × 150 条 = 750 条，通常不会再触发，保留作为兜底）
     if (a1Total > 1000) {
       let kept = 0;
       for (const locState of localities) {
@@ -455,10 +477,12 @@ function main() {
 
   for (const cc of countries) {
     const all = loadStreetGroups(db, cc);
-    // 强制按统一写死的数量上限（300条）进行均匀轮询抽取
+    // v4：只集中抽取人口密集的主要城市（小城市在函数内部被过滤掉），
+    // 再按统一写死的数量上限（300条）进行轮询抽取
     const picked = pickStreetsRoundRobin(all, FIXED_LIMIT);
 
     const admin1Set = new Set(picked.map((s) => s.admin1 || s.admin1Code || '').filter(Boolean));
+    const localitySet = new Set(picked.map((s) => `${normKey(s.admin1)}\u001f${normKey(s.locality)}`));
 
     const file = `${cc.toLowerCase()}.json`;
     const treeData = buildTreeJSON(picked);
@@ -471,12 +495,13 @@ function main() {
       streetCount: picked.length,
       totalInDb: all.length,
       admin1Count: admin1Set.size,
+      localityCount: localitySet.size, // v4新增：最终实际采集到的城市数量，用于核对"是否只集中在大城市"
     };
     // 确保写入的配置上限正确
     index.limitPerCountry = FIXED_LIMIT;
     fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), 'utf8');
 
-    console.log(`✅ ${cc}: 抽取 ${picked.length}/${all.length} 条真实街道, 均匀散布于 ${admin1Set.size} 个州/省 -> ${file}`);
+    console.log(`✅ ${cc}: 抽取 ${picked.length}/${all.length} 条真实街道, 集中于 ${admin1Set.size} 个州/省的 ${localitySet.size} 个主要城市 -> ${file}`);
   }
 
   db.close();
