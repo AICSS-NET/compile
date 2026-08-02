@@ -10,6 +10,16 @@ concurrency:
 env:
   NODE_VERSION: '24'
   ADDRESS_DATABASE_PATH: data/address.sqlite
+  # 精选的 20 个代表性国家。这是整个 workflow 里唯一的国家列表来源，
+  # "策略覆盖"步骤和"国家循环"步骤都从这里读取，避免两处列表不同步——
+  # 不同步会导致漏掉策略覆盖的国家悄悄退回仓库内置的巨大默认采集目标，
+  # 又变回之前的慢速行为，且不会有任何报错提示。
+  COUNTRIES: 'US CA MX GB DE FR IT ES NL RU JP KR SG VN TH PH MY IN AU BR'
+  # 每个国家最终只需要 300 条（见 export-offline-streets.mjs 里的 FIXED_LIMIT）。
+  # 这里给 3 倍缓冲（900），用来覆盖数据库 sync_country_policies 表里的
+  # target_count —— 这才是真正控制 materialize 阶段要采集/排序/落盘多少行数据的开关。
+  # 详见 scripts/set-country-policies.mjs 顶部注释。
+  ADDRESS_SYNC_POLICY_TARGET_COUNT: '900'
 
 jobs:
   collect-all:
@@ -55,8 +65,7 @@ jobs:
           .venv/bin/pip install -r server/sync/requirements.txt
 
           cp .env.example .env
-          
-          # 【提速核心1】：彻底删除 RECORDS_PER_LOCALITY 避免数据库引发 5000 万条的全美分组计算
+
           {
             echo "ADDRESS_DATABASE_PATH=${ADDRESS_DATABASE_PATH}"
             echo "ADDRESS_DATA_ROOT=data"
@@ -65,23 +74,44 @@ jobs:
             echo "ADDRESS_SYNC_REQUIRE_RESIDENTIAL=false"
             echo "ADDRESS_SYNC_TRANSLATION_ENABLED=false"
             echo "GOOGLE_TRANSLATION_ENABLED=false"
+            # 注意：这个变量只是"兜底值"——只有当某个国家在
+            # server/sync/address-policy.mjs 的 ADDRESS_POLICY_DEFAULTS 里完全没有
+            # 内置策略时才会用到它。我们跑的这 20 个国家全部都有内置策略，真正生效的
+            # 采集上限来自数据库 sync_country_policies 表，由下面新增的
+            # "Cap country policy targets" 步骤写入（见顶层 env 的
+            # ADDRESS_SYNC_POLICY_TARGET_COUNT）。保留这一行只是为了防御性兜底
+            # （例如以后新增一个在 ADDRESS_POLICY_DEFAULTS 里没有内置策略的国家）。
             echo "ADDRESS_SYNC_MAX_RECORDS_PER_SHARD=5000"
           } >> .env
 
           mkdir -p data data/staging offline-addresses scripts
           npm run db:migrate
-          
+
           npm run data:catalog || true
           if [ -f .data-cache/catalog-seed.sql ]; then
             npm run data:catalog:import
           fi
-          
-          # 【提速核心2】：暴力去除源码中的全表扫描 SQL 限制，逼迫 DuckDB 极速截断下载！
-          # （这三行 sed 拦截将使原本 10 分钟的 materialize 被压缩至几十秒内）
-          sed -i 's/ORDER BY random()//g' server/sync/address-etl.mjs || true
-          sed -i 's/QUALIFY ROW_NUMBER().*<=.*/ /g' server/sync/address-etl.mjs || true
 
           cp ../self/scripts/export-offline-streets.mjs scripts/export-offline-streets.mjs
+          cp ../self/scripts/set-country-policies.mjs scripts/set-country-policies.mjs
+
+      - name: Cap country policy targets (real fix for slow materialize)
+        working-directory: address
+        run: |
+          set -euo pipefail
+          echo "🔧 把 sync_country_policies.target_count 从仓库内置的默认值"
+          echo "   (US=50000 / JP=40000 / SG=8000 ...) 下调到 ${ADDRESS_SYNC_POLICY_TARGET_COUNT}"
+          echo "   这才是 materialize 阶段真正要采集/排序/落盘多少行数据的开关，"
+          echo "   之前 .env 里调低 ADDRESS_SYNC_MAX_RECORDS_PER_SHARD 对这 20 个国家从未生效过。"
+          node scripts/set-country-policies.mjs
+
+      - name: Restore Overture materialize cache
+        uses: actions/cache/restore@v4
+        with:
+          path: address/data/staging/normalized
+          key: overture-materialize-cache-${{ github.run_id }}
+          restore-keys: |
+            overture-materialize-cache-
 
       - name: Process 20 Fixed Countries Loop
         working-directory: address
@@ -89,16 +119,13 @@ jobs:
           PYTHON_BIN: ${{ github.workspace }}/address/.venv/bin/python
         run: |
           set -euo pipefail
-          
-          # 精选 20 个代表性国家
-          COUNTRIES="US CA MX GB DE FR IT ES NL RU JP KR SG VN TH PH MY IN AU BR"
-          
+
           echo "🚀 开始自动处理全球 20 个精选国家: $COUNTRIES"
 
           for CC in $COUNTRIES; do
             echo "::group::======== [ Processing $CC ] ========"
-            
-            echo "📥 开始同步 $CC，已解除云端全表扫描封印，即将极速截断..."
+
+            echo "📥 开始同步 $CC ..."
             node --env-file-if-exists=.env server/sync/address-etl.mjs --manual --shard "$CC" || echo "⚠️ ETL 同步失败: $CC"
 
             echo "📤 开始进行 $CC 的水桶轮询抽取 (强行固定300条)..."
@@ -106,11 +133,23 @@ jobs:
               --db "${ADDRESS_DATABASE_PATH}" \
               --out offline-addresses \
               --country "$CC" || echo "⚠️ 数据抽取失败: $CC"
-              
-            # 极限省空间：立刻清空缓存
-            rm -rf data/staging/*
+
+            # 只清理 DuckDB 自己的落盘临时目录 (spill temp)，不再整体删除 data/staging/*：
+            # data/staging/normalized/*.jsonl 是 materialize 步骤的产出缓存
+            # （materializeOverture 内置了"文件已存在就直接复用"的命中逻辑），删掉它，
+            # 下次哪怕只是重新手动跑一次这个 workflow，也要重新对着远程 Overture
+            # Parquet 扫描一遍。缓存文件本身很小（调低 target_count 后只有几百 KB
+            # 级别），不清理不会把 runner 磁盘写满。
+            rm -rf data/staging/normalized/duckdb-temp
             echo "::endgroup::"
           done
+
+      - name: Save Overture materialize cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: address/data/staging/normalized
+          key: overture-materialize-cache-${{ github.run_id }}
 
       - name: Upload Final Artifact
         if: always()
