@@ -366,9 +366,13 @@ function pickStreetsRoundRobin(citiesWithStreets, limit) {
   // 该城市的配额时才会被用上。两组内部各自打乱顺序，避免总是选到同一批。
   const pool = citiesWithStreets
     .map((c) => {
-      const addressed = shuffleInPlace(c.streets.filter((s) => s.houseNumbers.size > 0));
-      const nameOnly = shuffleInPlace(c.streets.filter((s) => s.houseNumbers.size === 0));
-      return { ...c, streets: [...addressed, ...nameOnly], idx: 0 };
+      // 门牌数量多的优先；数量相同则随机，避免总是同一批
+      const sorted = [...c.streets].sort((a, b) => {
+        const diff = b.houseNumbers.size - a.houseNumbers.size;
+        if (diff !== 0) return diff;
+        return Math.random() - 0.5;
+      });
+      return { ...c, streets: sorted, idx: 0 };
     })
     .filter((c) => c.streets.length > 0);
 
@@ -397,7 +401,16 @@ function extractHouseNumberRange(houseNumbers) {
     .map((n) => Number(n))
     .filter((n) => Number.isFinite(n) && n > 0);
   if (nums.length === 0) return null;
-  return [Math.min(...nums), Math.max(...nums)];
+
+  let min = Math.min(...nums);
+  let max = Math.max(...nums);
+
+  // 只采到一个门牌（或全部相同）时，向下扩 30，避免范围退化成单点
+  if (min === max) {
+    min = Math.max(1, min - 30);
+  }
+
+  return [min, max];
 }
 
 function buildTreeJSON(countryCode, picked) {
