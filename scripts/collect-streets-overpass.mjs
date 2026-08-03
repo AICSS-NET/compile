@@ -118,6 +118,12 @@ function parseArgs(argv) {
   return out;
 }
 
+// 清理不可见字符 (Zero-width spaces, LRM, RLM, BOM 等)
+function sanitizeString(str) {
+  if (!str) return '';
+  return String(str).replace(/[\u200B-\u200D\uFEFF\u200E\u200F]/g, '').trim();
+}
+
 function normKey(value) {
   if (!value) return '';
   return String(value).normalize('NFKC').trim().toLowerCase();
@@ -134,7 +140,6 @@ function shuffleInPlace(arr) {
   }
   return arr;
 }
-
 
 // 根据国家+城市生成一个"看起来合理"的固定电话区号前缀，纯展示用途，和原脚本逻辑一致
 // （用字符串哈希取模，同一个城市每次生成结果稳定不变）。
@@ -325,7 +330,26 @@ function extractStreetsFromElements(elements) {
   // 第一遍：道路网络里所有带名字的路，先把"这条街确实存在"记下来
   for (const el of elements) {
     if (el.type === 'way' && el.tags?.highway && el.tags?.name) {
-      ensure(el.tags.name);
+      let rawName = sanitizeString(el.tags.name);
+      
+      // 规则：OSM 常用 ; 连写双名，拆开只取第一段
+      rawName = rawName.split(';')[0].trim();
+      if (!rawName) continue; // 边界防御，防止切分/清理后为空
+      
+      // 规则：长度防御。如果长度超过 50 个字符，大概率是被滥用填入了完整的寄信地址。
+      if (rawName.length > 50) continue;
+      
+      // 规则：极强拦截。正常的街道名极其罕见包含逗号。有逗号 99.9% 是"街道, 城市"的冗余信息
+      if (rawName.includes(',')) continue;
+
+      // 规则：过滤掉把门牌号写进道路名的脏数据
+      if (/^\d+$/.test(rawName)) continue;
+      
+      // 规则：过滤掉路床、楼层单元、步道、以及乱填的 POI/地标（如 Opposite, Near, Ground Floor）
+      if (/\b(roadbed|penthouse|bike\s*path|ramp|floor|g\/?f|unit\s+no|opp|opposite|near\b|next\s+to|room|suite|apartment|apt)\b/i.test(rawName)) continue;
+
+      el.tags.name = rawName; // 覆写回去，保持一致性
+      ensure(rawName);
     }
   }
 
@@ -333,21 +357,46 @@ function extractStreetsFromElements(elements) {
   // 即使这个街道名没有在第一遍里出现（比如查询半径边缘只碰到了地址点没碰到路），
   // 只要有门牌号证据，也认为它是一条真实存在的街道，一并采集。
   for (const el of elements) {
-    const street = el.tags?.['addr:street'];
+    let street = el.tags?.['addr:street'];
     const houseNumber = el.tags?.['addr:housenumber'];
     if (!street || !houseNumber) continue;
+
+    street = sanitizeString(street);
+    street = street.split(';')[0].trim();
+    if (!street) continue; // 边界防御，防止切分/清理后为空
+    
+    // 规则复用：清理并校验非法地址点路名
+    if (street.length > 50) continue;
+    if (street.includes(',')) continue;
+    if (/^\d+$/.test(street)) continue;
+    if (/\b(roadbed|penthouse|bike\s*path|ramp|floor|g\/?f|unit\s+no|opp|opposite|near\b|next\s+to|room|suite|apartment|apt)\b/i.test(street)) continue;
+
     const entry = ensure(street);
     if (!entry) continue;
 
     // OSM 里偶尔会出现一个字段填了多个值、用分号隔开的情况（比如某个地址正好横跨
-    // 两个邮编分区，被标注成 "90013;90015"）。之前直接把整串当一个邮编存了进去，
-    // 这里按分号拆开，当成多个独立候选。
-    for (const hn of String(houseNumber).split(';').map((s) => s.trim()).filter(Boolean)) {
-      entry.houseNumbers.add(hn);
+    // 两个邮编分区，被标注成 "90013;90015"）。这里按分号拆开，当成多个独立候选。
+    for (let hn of String(houseNumber).split(';')) {
+      hn = sanitizeString(hn);
+      if (hn) entry.houseNumbers.add(hn);
     }
+
     const postcodeRaw = el.tags?.['addr:postcode'];
     if (postcodeRaw) {
-      for (const pc of String(postcodeRaw).split(';').map((s) => s.trim()).filter(Boolean)) {
+      for (let pc of String(postcodeRaw).split(';')) {
+        pc = sanitizeString(pc);
+        
+        // 规则：邮编粗校验，长度控制在3-10位之间
+        // 并且只允许Unicode字母(\p{L})、数字(\p{N})、空格、连字符
+        if (pc.length < 3 || pc.length > 10 || !/^[\p{L}\p{N}\s\-]+$/u.test(pc)) {
+          continue;
+        }
+
+        // 规则：如果是连续9位以上的纯数字(忽略空格和横杠后)，极有可能是电话号码、CPF 等证件号写错进来了
+        if (/^\d{9,}$/.test(pc.replace(/[\s\-]/g, ''))) {
+          continue;
+        }
+
         entry.postcodes.add(pc);
       }
     }
