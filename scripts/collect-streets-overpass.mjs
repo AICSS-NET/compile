@@ -299,8 +299,8 @@ function extractStreetsFromElements(elements) {
       rawName = rawName.split(';')[0].trim();
       if (!rawName) continue; 
       
-      // 【长文本拦截】超过 50 个字符极大概率是被滥用填入了完整地址/长描述
-      if (rawName.length > 50) continue;
+      // 【长文本拦截】超过 80 个字符极大概率是被滥用填入了完整地址/长描述（放宽至80以保护拉美名人街道）
+      if (rawName.length > 80) continue;
       
       // 【包含逗号拦截】正常的街道名极少包含逗号，有逗号说明是级联地址拼接
       if (rawName.includes(',')) continue;
@@ -330,7 +330,7 @@ function extractStreetsFromElements(elements) {
     if (!street) continue; 
     
     // 复用所有路名拦截规则
-    if (street.length > 50) continue;
+    if (street.length > 80) continue;
     if (street.includes(',')) continue;
     if (/(^www\.|^http)/i.test(street)) continue;
     if (/^\d+$/.test(street)) continue;
