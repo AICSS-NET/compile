@@ -14,7 +14,14 @@ on:
       limit_per_country:
         description: '每个国家最终导出的街道条数上限'
         required: false
-        default: '300'
+        default: '60'
+      user_agent:
+        description: >-
+          Overpass 请求用的 User-Agent(留空则用仓库变量 OVERPASS_USER_AGENT)。
+          建议不要每次手填，去 Settings -> Secrets and variables -> Actions ->
+          Variables 里加一个 OVERPASS_USER_AGENT，配一次就不用管了。
+        required: false
+        default: ''
 
 concurrency:
   group: export-offline-streets
@@ -42,8 +49,18 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Collect streets
+        env:
+          OVERPASS_USER_AGENT: ${{ inputs.user_agent || vars.OVERPASS_USER_AGENT }}
         run: |
           set -euo pipefail
+
+          if [ -z "${OVERPASS_USER_AGENT}" ]; then
+            echo "❌ 没有配置 User-Agent。去 Settings -> Secrets and variables -> Actions ->"
+            echo "   Variables 加一个仓库变量 OVERPASS_USER_AGENT，或者本次运行时在"
+            echo "   workflow_dispatch 的 user_agent 输入框里临时填一个。"
+            exit 1
+          fi
+
           mkdir -p offline-addresses
 
           ARGS="--out offline-addresses"
