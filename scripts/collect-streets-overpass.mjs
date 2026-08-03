@@ -98,8 +98,8 @@ function parseArgs(argv) {
     // 单次查询里，Overpass 最多返回多少条"道路"/多少个"带门牌号的地址点"——这两个是
     // 硬性封顶（安全阀），实际请求量会按这个城市当次实际需要多少条街道动态计算，通常远小于
     // 这个封顶值，只有在需要量本身很大时才会顶到这里。
-    maxRoadsPerCity: 300,
-    maxAddrPointsPerCity: 3000,
+    maxRoadsPerCity: 200,
+    maxAddrPointsPerCity: 2000,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -251,17 +251,13 @@ function radiusForPopulation(population, override) {
 const ADDRESSABLE_HIGHWAY_TYPES = 'residential|living_street|unclassified|tertiary|secondary|primary|road';
 
 function buildOverpassQuery(lat, lon, radiusMeters, { maxRoads, maxAddrPoints }) {
-  // 用命名集合(->.roads 等)把"道路"和"带门牌号的地址点"分开统计、分开限流：
-  // 如果只在最后统一用一个 out 数量上限，道路数据量一大就会把地址点的配额挤占掉，
-  // 导致门牌号证据反而采不到。分开限流之后两者互不影响。
-  // [maxsize:64Mi] 让服务器按“小查询”优先调度，显著降低 504 概率。
   return `[out:json][timeout:60][maxsize:64Mi];
 way(around:${radiusMeters},${lat},${lon})["highway"~"^(${ADDRESSABLE_HIGHWAY_TYPES})$"]["name"]->.roads;
 node(around:${radiusMeters},${lat},${lon})["addr:housenumber"]["addr:street"]->.addrNodes;
 way(around:${radiusMeters},${lat},${lon})["addr:housenumber"]["addr:street"]->.addrWays;
-.roads out tags center ${maxRoads};
+.roads out tags ${maxRoads};
 .addrNodes out tags ${maxAddrPoints};
-.addrWays out tags center ${Math.round(maxAddrPoints / 2)};`;
+.addrWays out tags ${Math.round(maxAddrPoints / 2)};`;
 }
 
 async function queryOverpassWithRetry(query, userAgent, { maxAttemptsPerEndpoint = 2 } = {}) {
@@ -436,10 +432,10 @@ function buildTreeJSON(countryCode, picked) {
 // 也是这类超大城市最容易 504 超时/被判定成爬虫的原因。
 // ROADS_BUFFER_FACTOR / ADDR_BUFFER_FACTOR 是"多要一点做冗余"的倍数——
 // 不是查到多少条道路就有多少条带门牌号证据，需要额外冗余才能保证优先挑选逻辑有得选。
-const ROADS_BUFFER_FACTOR = 5; // 道路：只是确认"这条街真实存在"，冗余倍数不用太高
-const ADDR_BUFFER_FACTOR = 40; // 地址点：很多地址点才能换来一条街的门牌号证据，需要更大冗余
-const MIN_ROADS_QUERY = 20;
-const MIN_ADDR_QUERY = 200;
+const ROADS_BUFFER_FACTOR = 3; // 道路：只是确认"这条街真实存在"，冗余倍数不用太高
+const ADDR_BUFFER_FACTOR = 30; // 地址点：很多地址点才能换来一条街的门牌号证据，需要更大冗余
+const MIN_ROADS_QUERY = 15;
+const MIN_ADDR_QUERY = 100;
 
 function computeDynamicCaps(neededCount, opts) {
   return {
