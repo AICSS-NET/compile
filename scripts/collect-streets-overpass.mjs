@@ -214,6 +214,7 @@ function loadCitiesForCountries(citiesTxt, admin1Map, countries, citiesPerCountr
 
     if (!countrySet.has(countryCode)) continue;
     if (!name || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    if (population < 100_000) continue;
 
     const admin1Key = admin1Code ? `${countryCode}.${admin1Code}` : '';
     const admin1Name = admin1Map.get(admin1Key) || admin1Code || '-';
