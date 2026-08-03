@@ -28,13 +28,15 @@
  *    （需要署名）。这点和之前用的 Overture Maps（CDLA Permissive 2.0，基本无限制）不一样，
  *    如果你要对外分发这份数据，请附上署名。
  * 4. Overpass 是社区免费运营的公共服务，有"合理使用"的隐性限制，不是无限量 API。脚本里对
- *    每次查询之间做了限速（默认 2 秒一次），并且必须设置一个能表明身份的 User-Agent
- *    （见下面 USER_AGENT 常量，请求你改成能联系到你的信息，而不是用默认占位符）。
+ *    每次查询之间做了限速（默认 3 秒一次 + 随机抖动），并且必须提供一个能表明身份的
+ *    User-Agent——通过 --user-agent 参数或 OVERPASS_USER_AGENT 环境变量提供，没提供
+ *    直接拒绝执行，不是打个警告就放任不管。
  *
  * 用法：
  *   node collect-streets-overpass.mjs --out offline-addresses \
+ *     --user-agent "your-project/1.0 (contact: you@example.com)" \
  *     [--countries US,CA,MX,...] [--cities-per-country 6] [--limit 60] \
- *     [--min-streets-warn 5] [--work-dir .geonames-cache] [--overpass-delay-ms 2000]
+ *     [--min-streets-warn 5] [--work-dir .geonames-cache] [--overpass-delay-ms 3000]
  *
  * 建议先用 --countries US --cities-per-country 1 只测一个国家一个城市，确认真实数据没问题，
  * 再跑全量。每处理完一个国家就会把 addresses.json 重新落盘一次，中途失败/被取消也不会
@@ -49,7 +51,12 @@ import { execFileSync } from 'node:child_process';
 
 // 必须改成你自己的信息（项目地址或联系邮箱都行）——Overpass/OSM 社区要求请求方
 // 表明身份，用默认占位符长期高频请求，容易被公共实例限流或拉黑。
-const USER_AGENT = 'offline-streets-collector/1.0 (contact: CHANGE_ME@example.com)';
+// User-Agent 必须能表明请求方身份（Overpass/OSM 社区的硬性要求），不再是写死在源码里
+// 改起来麻烦的常量——从环境变量 OVERPASS_USER_AGENT 或 --user-agent 参数读取，
+// 都没提供就直接拒绝执行（见下面 main() 里的检查），而不是打个警告就放任不管。
+function resolveUserAgent(cliValue) {
+  return cliValue || process.env.OVERPASS_USER_AGENT || null;
+}
 
 const GEONAMES_CITIES_URL = 'https://download.geonames.org/export/dump/cities15000.zip';
 const GEONAMES_ADMIN1_URL = 'https://download.geonames.org/export/dump/admin1CodesASCII.txt';
@@ -83,7 +90,7 @@ function parseArgs(argv) {
     limit: 60,
     minStreetsWarn: 5,
     workDir: '.geonames-cache',
-    overpassDelayMs: 2000,
+    overpassDelayMs: 3000,
     radiusMetersOverride: null,
     // 单次查询里，Overpass 最多返回多少条"道路"/多少个"带门牌号的地址点"——这两个是
     // 硬性封顶（安全阀），实际请求量会按这个城市当次实际需要多少条街道动态计算，通常远小于
@@ -101,6 +108,7 @@ function parseArgs(argv) {
     else if (a === '--work-dir') out.workDir = argv[++i];
     else if (a === '--overpass-delay-ms') out.overpassDelayMs = Number(argv[++i]);
     else if (a === '--radius-m') out.radiusMetersOverride = Number(argv[++i]);
+    else if (a === '--user-agent') out.userAgent = argv[++i];
     else if (a === '--max-roads-per-city') out.maxRoadsPerCity = Number(argv[++i]);
     else if (a === '--max-addr-points-per-city') out.maxAddrPointsPerCity = Number(argv[++i]);
   }
@@ -253,7 +261,7 @@ way(around:${radiusMeters},${lat},${lon})["addr:housenumber"]["addr:street"]->.a
 .addrWays out tags center ${Math.round(maxAddrPoints / 2)};`;
 }
 
-async function queryOverpassWithRetry(query, { maxAttemptsPerEndpoint = 2 } = {}) {
+async function queryOverpassWithRetry(query, userAgent, { maxAttemptsPerEndpoint = 2 } = {}) {
   let lastError = null;
   for (const endpoint of OVERPASS_ENDPOINTS) {
     for (let attempt = 1; attempt <= maxAttemptsPerEndpoint; attempt++) {
@@ -262,7 +270,12 @@ async function queryOverpassWithRetry(query, { maxAttemptsPerEndpoint = 2 } = {}
           method: 'POST',
           headers: {
             'Content-Type': 'text/plain; charset=utf-8',
-            'User-Agent': USER_AGENT,
+            'User-Agent': userAgent,
+            // 一部分"疑似爬虫"判定是靠请求头是否齐全——只有 Content-Type 和自定义
+            // User-Agent，没有 Accept/Accept-Language 这种正常客户端都会带的头，
+            // 本身就是一个可疑信号。补上这两个，让请求更接近真实客户端。
+            Accept: 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
           },
           body: query,
         });
@@ -435,7 +448,7 @@ function computeDynamicCaps(neededCount, opts) {
 async function fetchStreetsForCity(city, radius, opts, neededCount) {
   const { maxRoads, maxAddrPoints } = computeDynamicCaps(neededCount, opts);
   const query = buildOverpassQuery(city.lat, city.lon, radius, { maxRoads, maxAddrPoints });
-  const elements = await queryOverpassWithRetry(query);
+  const elements = await queryOverpassWithRetry(query, opts.userAgent);
   const streetsMap = extractStreetsFromElements(elements);
   return [...streetsMap.values()];
 }
@@ -446,11 +459,20 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   fs.mkdirSync(opts.outDir, { recursive: true });
 
-  if (USER_AGENT.includes('CHANGE_ME')) {
-    console.warn(
-      '[警告] USER_AGENT 还是默认占位符，请改成能联系到你的信息（邮箱/项目地址），' +
-        '否则高频请求公共 Overpass 实例容易被限流或拉黑。'
+  // 之前只是打个警告然后照样跑，结果这个警告被连续忽略了好几轮——现在改成硬性要求：
+  // 没有提供合法的 User-Agent 就直接拒绝执行，而不是把"信号越像爬虫就越容易被拦"的
+  // 责任丢给日志里一行容易被滚动过去的提示。
+  opts.userAgent = resolveUserAgent(opts.userAgent);
+  if (!opts.userAgent || opts.userAgent.includes('CHANGE_ME')) {
+    console.error(
+      '[错误] 没有提供有效的 User-Agent，拒绝执行。\n' +
+        '  Overpass/OSM 社区要求请求方能被识别身份，缺失或占位符 User-Agent 是触发\n' +
+        '  "疑似爬虫"拦截（HTTP 406）的直接因素之一。\n' +
+        '  请用以下任一方式提供：\n' +
+        '    1) 命令行参数: --user-agent "your-project/1.0 (contact: you@example.com)"\n' +
+        '    2) 环境变量:   OVERPASS_USER_AGENT="your-project/1.0 (contact: you@example.com)"'
     );
+    process.exit(1);
   }
 
   const { citiesTxt, admin1Txt } = ensureGeonamesFiles(opts.workDir);
@@ -513,7 +535,9 @@ async function main() {
         citiesWithStreets.push({ city: city.name, admin1: city.admin1, streets });
       }
 
-      await sleep(opts.overpassDelayMs); // 限速，善待公共 Overpass 实例
+      // 加一点随机抖动（0~1.5秒）——完全固定的请求间隔本身也是容易被识别成脚本的
+      // 特征之一，抖动一下让请求节奏更接近真人操作。
+      await sleep(opts.overpassDelayMs + Math.floor(Math.random() * 1500));
     }
 
     const picked = pickStreetsRoundRobin(citiesWithStreets, opts.limit);
