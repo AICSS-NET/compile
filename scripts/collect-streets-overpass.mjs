@@ -28,7 +28,7 @@
  *    （需要署名）。这点和之前用的 Overture Maps（CDLA Permissive 2.0，基本无限制）不一样，
  *    如果你要对外分发这份数据，请附上署名。
  * 4. Overpass 是社区免费运营的公共服务，有"合理使用"的隐性限制，不是无限量 API。脚本里对
- *    每次查询之间做了限速（默认 3 秒一次 + 随机抖动），并且必须提供一个能表明身份的
+ *    每次查询之间做了限速（默认 2 秒一次 + 随机抖动），并且必须提供一个能表明身份的
  *    User-Agent——通过 --user-agent 参数或 OVERPASS_USER_AGENT 环境变量提供，没提供
  *    直接拒绝执行，不是打个警告就放任不管。
  *
@@ -36,7 +36,7 @@
  *   node collect-streets-overpass.mjs --out offline-addresses \
  *     --user-agent "your-project/1.0 (contact: you@example.com)" \
  *     [--countries US,CA,MX,...] [--cities-per-country 6] [--limit 60] \
- *     [--min-streets-warn 5] [--work-dir .geonames-cache] [--overpass-delay-ms 3000]
+ *     [--min-streets-warn 5] [--work-dir .geonames-cache] [--overpass-delay-ms 2000]
  *
  * 建议先用 --countries US --cities-per-country 1 只测一个国家一个城市，确认真实数据没问题，
  * 再跑全量。每处理完一个国家就会把 addresses.json 重新落盘一次，中途失败/被取消也不会
@@ -62,15 +62,18 @@ const GEONAMES_CITIES_URL = 'https://download.geonames.org/export/dump/cities150
 const GEONAMES_ADMIN1_URL = 'https://download.geonames.org/export/dump/admin1CodesASCII.txt';
 
 // 多个 Overpass 公共实例，主实例失败/被限流时按顺序尝试下一个。
-//
+// 优先使用声明无硬性速率限制、硬件更强的镜像，主实例放最后兜底。
 // 关于 HTTP 406：这不是限流也不是查询语法问题。2025-2026 年 overpass-api.de 主实例
 // 因为被大量 AI 爬虫流量冲击，加了一套"请求特征"过滤，命中了就直接拒绝——对同一台服务器
 // 重试拿到的是一模一样的拒绝，唯一有效的办法是换一台服务器（见下面 queryOverpassWithRetry
-// 里 406 分支的处理：不重试同一个 endpoint，直接跳下一个）。这里多放一个镜像兜底。
+// 里 406 分支的处理：不重试同一个 endpoint，直接跳下一个）。
 const OVERPASS_ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',   // 首选：无硬性 rate limit
+  'https://overpass.kumi.systems/api/interpreter',     // 同家族
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter', // VK Maps，常宣称无限制
+  'https://z.overpass-api.de/api/interpreter',         // FOSSGIS 镜像
+  'https://lz4.overpass-api.de/api/interpreter',       // FOSSGIS 大查询镜像
+  'https://overpass-api.de/api/interpreter',           // 主实例，最后兜底
 ];
 
 const DEFAULT_COUNTRIES = [
@@ -252,7 +255,8 @@ function buildOverpassQuery(lat, lon, radiusMeters, { maxRoads, maxAddrPoints })
   // 用命名集合(->.roads 等)把"道路"和"带门牌号的地址点"分开统计、分开限流：
   // 如果只在最后统一用一个 out 数量上限，道路数据量一大就会把地址点的配额挤占掉，
   // 导致门牌号证据反而采不到。分开限流之后两者互不影响。
-  return `[out:json][timeout:60];
+  // [maxsize:64Mi] 让服务器按“小查询”优先调度，显著降低 504 概率。
+  return `[out:json][timeout:60][maxsize:64Mi];
 way(around:${radiusMeters},${lat},${lon})["highway"~"^(${ADDRESSABLE_HIGHWAY_TYPES})$"]["name"]->.roads;
 node(around:${radiusMeters},${lat},${lon})["addr:housenumber"]["addr:street"]->.addrNodes;
 way(around:${radiusMeters},${lat},${lon})["addr:housenumber"]["addr:street"]->.addrWays;
@@ -288,10 +292,10 @@ async function queryOverpassWithRetry(query, userAgent, { maxAttemptsPerEndpoint
           break;
         }
         if (response.status === 429 || response.status === 504) {
-          // 429/504 才是真的限流/服务器端超时，退避后重试同一个实例，不行再换下一个实例
-          const backoffMs = 3000 * attempt;
-          console.warn(`[overpass] ${endpoint} 返回 ${response.status}，${backoffMs}ms 后重试`);
-          await sleep(backoffMs);
+          // 固定短等再试，不做指数退避，尽快换镜像或进入下一城，缩短总墙钟时间
+          const waitMs = 2500;
+          console.warn(`[overpass] ${endpoint} 返回 ${response.status}，${waitMs}ms 后重试`);
+          await sleep(waitMs);
           continue;
         }
         if (!response.ok) {
@@ -302,7 +306,7 @@ async function queryOverpassWithRetry(query, userAgent, { maxAttemptsPerEndpoint
       } catch (error) {
         lastError = error;
         console.warn(`[overpass] ${endpoint} 第 ${attempt} 次请求失败: ${error.message}`);
-        await sleep(1000 * attempt);
+        await sleep(1000);
       }
     }
   }
