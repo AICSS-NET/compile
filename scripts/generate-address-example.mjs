@@ -58,6 +58,11 @@ function generateOneAddress(countryCode, countryTree) {
   const postcode = randomItem(cityNode.postcodes) || '';
   const phone = randomPhoneNumber(cityNode.phonePrefix || '000');
 
+  // 防御性格式化：避免出现 ", -" 这种空行政区占位符，避免邮编为空时出现双空格
+  const adminStr = admin1 !== '-' ? `, ${admin1}` : '';
+  const zipStr = postcode ? ` ${postcode}` : '';
+  const formatted = `${houseNumber} ${streetName}, ${city}${adminStr}${zipStr}, ${countryCode}`;
+
   return {
     country: countryCode,
     admin1,
@@ -67,7 +72,7 @@ function generateOneAddress(countryCode, countryTree) {
     houseNumberInRange,
     postcode,
     phone,
-    formatted: `${houseNumber} ${streetName}, ${city}, ${admin1} ${postcode}, ${countryCode}`,
+    formatted,
   };
 }
 
