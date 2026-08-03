@@ -27,9 +27,11 @@ jobs:
   collect:
     name: Collect streets via GeoNames + Overpass
     runs-on: ubuntu-latest
-    # 不再需要等 DuckDB 扫描远程 Parquet，20 个国家 × 6 个城市 = 120 次轻量 Overpass
-    # 查询，配合限速，正常情况下应该在半小时以内跑完，留一些余量。
-    timeout-minutes: 60
+    # 20 个国家 × 6 个城市 = 120 次 Overpass 查询，配合限速 + 失败重试 + 缩小半径兜底，
+    # 墨西哥城/纽约这类超大都会偶尔会比较磨人，留够余量避免被 GitHub Actions 自己的
+    # job 超时机制打断（打断后会看到 "Error: The operation was canceled." ——
+    # 这条消息是 GitHub Actions 自己打的，不是脚本抛出的）。
+    timeout-minutes: 90
     steps:
       - name: Checkout self
         uses: actions/checkout@v4
