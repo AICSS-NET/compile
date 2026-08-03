@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 基于 GeoNames(选城市) + Overpass API(拉街道)的离线街道 JSON 采集脚本。
+ * 基于 GeoNames(选城市) + Overpass API(拉街道)的离线地址 JSON 采集脚本。
  *
  * 彻底替代之前"daimon3332/address + Overture Maps + DuckDB"那一整套流水线：
  * - 不再需要 Python / DuckDB / sqlite / 第三方仓库 / GitHub Actions 里一堆 ETL 步骤。
@@ -10,26 +10,35 @@
  * - 街道数据：对每个选中的城市，直接向 Overpass API（OpenStreetMap 的查询接口）发一次
  *   基于经纬度半径的查询，拿该城市范围内所有有名字的道路，以及带门牌号/邮编标注的地址点。
  *
+ * 输出：单个合并文件 <out>/addresses.json，结构是
+ *   { countries: { US: { 州/省: { 城市: { phonePrefix, postcodes, streets: { 街道名: { houseNumberRange } } } } } } }
+ * 刻意做得很精简，只保留"随机生成一个真实地址(含门牌号范围/邮编/电话前缀)"这个目标需要的字段：
+ * - 没有 district 这一级（Overpass 的半径查询本来就拿不到行政区细分，硬留着只是空壳）。
+ * - 门牌号不是存原始数组，是压缩成 [min, max] 数值范围——你要的是范围不是逐个数字。
+ * - 邮编统一挂在城市这一级，不在每条街上都重复存一份。
+ *
  * 需要老实说明的数据现实（和之前方案相比的取舍）：
  * 1. 门牌号/邮编覆盖率取决于 OpenStreetMap 在当地的标注完整度，参差不齐——欧洲/日韩这类
- *    国家通常标注率高，东南亚/南美一些城市会明显偏低。没有门牌号证据的街道，range 字段会是
- *    空字符串，但街道本身（来自道路网络数据）依然会被采集，不会像之前的质量门那样直接整条丢弃。
- * 2. 输出里不再有"district"这一级（Overpass 的半径查询不返回行政区划细分），统一填 '-'，
- *    和原脚本在 district 缺失时的兜底行为一致。
+ *    国家通常标注率高，东南亚/南美一些城市会明显偏低。没有门牌号证据的街道，streets 里
+ *    对应的值是空对象 {}，但街道本身（来自道路网络数据）依然会被采集。
+ * 2. 邮编是城市级的一个候选池，不精确对应到具体某条街——大城市可能横跨好几个邮区，
+ *    随机生成时挑到的邮编不保证就是那条街真实所在的邮区。这是为了避免每条街都存一份
+ *    重复邮编数据必须接受的取舍。
  * 3. OpenStreetMap 数据协议是 ODbL（需要署名 + 派生数据库同样开放），GeoNames 是 CC-BY 4.0
  *    （需要署名）。这点和之前用的 Overture Maps（CDLA Permissive 2.0，基本无限制）不一样，
  *    如果你要对外分发这份数据，请附上署名。
  * 4. Overpass 是社区免费运营的公共服务，有"合理使用"的隐性限制，不是无限量 API。脚本里对
- *    每次查询之间做了限速（默认 1.5 秒一次），并且必须设置一个能表明身份的 User-Agent
+ *    每次查询之间做了限速（默认 2 秒一次），并且必须设置一个能表明身份的 User-Agent
  *    （见下面 USER_AGENT 常量，请求你改成能联系到你的信息，而不是用默认占位符）。
  *
  * 用法：
  *   node collect-streets-overpass.mjs --out offline-addresses \
- *     [--countries US,CA,MX,...] [--cities-per-country 6] [--limit 300] \
- *     [--min-streets-warn 5] [--work-dir .geonames-cache] [--overpass-delay-ms 1500]
+ *     [--countries US,CA,MX,...] [--cities-per-country 6] [--limit 60] \
+ *     [--min-streets-warn 5] [--work-dir .geonames-cache] [--overpass-delay-ms 2000]
  *
  * 建议先用 --countries US --cities-per-country 1 只测一个国家一个城市，确认真实数据没问题，
- * 再跑全量。
+ * 再跑全量。每处理完一个国家就会把 addresses.json 重新落盘一次，中途失败/被取消也不会
+ * 丢掉已经跑完的国家。
  */
 
 import fs from 'node:fs';
@@ -69,15 +78,16 @@ function parseArgs(argv) {
     outDir: 'offline-addresses',
     countries: DEFAULT_COUNTRIES,
     citiesPerCountry: 6,
-    limit: 300,
+    // 之前默认 300，但你只是要"一些"街道用来生成示例地址，不需要这么多——
+    // 6 个城市 × 10 条左右足够覆盖多样性了，需要更多用 --limit 调大即可。
+    limit: 60,
     minStreetsWarn: 5,
     workDir: '.geonames-cache',
     overpassDelayMs: 2000,
     radiusMetersOverride: null,
-    // 单次查询里，Overpass 最多返回多少条"道路"/多少个"带门牌号的地址点"。
-    // 之前没设上限，纽约一个城市就采回 7268 条街道、墨西哥城 25166 条——
-    // 远超实际需要（每城市最终只要 limit/citiesPerCountry 条左右），
-    // 白白拖慢查询、加重公共 Overpass 服务器负担，还更容易触发限流/反爬拒绝。
+    // 单次查询里，Overpass 最多返回多少条"道路"/多少个"带门牌号的地址点"——这两个是
+    // 硬性封顶（安全阀），实际请求量会按这个城市当次实际需要多少条街道动态计算，通常远小于
+    // 这个封顶值，只有在需要量本身很大时才会顶到这里。
     maxRoadsPerCity: 600,
     maxAddrPointsPerCity: 4000,
   };
@@ -114,38 +124,6 @@ function shuffleInPlace(arr) {
   return arr;
 }
 
-// 门牌号压缩：按连续数字压缩合并（例如 [1,2,3,5] -> "1-3, 5"）。与原脚本逻辑保持一致。
-function compressHouseNumbers(numbers) {
-  const nums = Array.from(
-    new Set(
-      numbers
-        .map((n) => String(n).trim())
-        .filter(Boolean)
-        .map((n) => (Number.isFinite(Number(n)) ? Number(n) : n))
-    )
-  );
-  const numeric = nums.filter((n) => typeof n === 'number').sort((a, b) => a - b);
-  const nonNumeric = nums.filter((n) => typeof n !== 'number').sort();
-
-  const ranges = [];
-  let start = null;
-  let prev = null;
-  for (const n of numeric) {
-    if (start === null) {
-      start = n;
-      prev = n;
-    } else if (n === prev + 1) {
-      prev = n;
-    } else {
-      ranges.push(start === prev ? `${start}` : `${start}-${prev}`);
-      start = n;
-      prev = n;
-    }
-  }
-  if (start !== null) ranges.push(start === prev ? `${start}` : `${start}-${prev}`);
-
-  return [...ranges, ...nonNumeric].join(', ');
-}
 
 // 根据国家+城市生成一个"看起来合理"的固定电话区号前缀，纯展示用途，和原脚本逻辑一致
 // （用字符串哈希取模，同一个城市每次生成结果稳定不变）。
@@ -246,6 +224,9 @@ function loadCitiesForCountries(citiesTxt, admin1Map, countries, citiesPerCountr
 // 半径主要影响服务器端要扫描的范围大小，适当缩小能降低超大城市查询超时的概率）
 function radiusForPopulation(population, override) {
   if (override) return override;
+  // 800万+ 的超级都会(墨西哥城1229万、纽约880万这种)实测哪怕在"500万+"这档参数下
+  // 依然经常触发 504——单独再收紧一档。
+  if (population >= 8_000_000) return 7_000;
   if (population >= 5_000_000) return 10_000;
   if (population >= 1_000_000) return 8_000;
   if (population >= 300_000) return 6_000;
@@ -395,43 +376,68 @@ function pickStreetsRoundRobin(citiesWithStreets, limit) {
 
 // ============================== 第四步：拼装树形 JSON ==============================
 
+// 从门牌号集合里提取数字范围 [min, max]。非数字门牌号（如 "5A"）不参与范围计算——
+// "范围"这个概念本身只对数字有意义，为了不引入臃肿的原始数组，这里直接丢弃非数字项。
+// 一个都没有数字门牌号时返回 null，表示这条街完全没有门牌号证据。
+function extractHouseNumberRange(houseNumbers) {
+  const nums = [...houseNumbers]
+    .map((n) => Number(n))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  if (nums.length === 0) return null;
+  return [Math.min(...nums), Math.max(...nums)];
+}
+
 function buildTreeJSON(countryCode, picked) {
   const root = {};
   for (const s of picked) {
     const a1 = s.admin1 || '-';
     const city = s.city || '-';
-    const district = '-'; // Overpass 半径查询不返回行政区划细分，统一填 '-'
 
     root[a1] ??= {};
     root[a1][city] ??= {
-      _meta: {
-        // 注意：phonePrefix 是根据国家+城市名生成的固定哈希前缀，纯粹为了让生成出来的
-        // 电话号码"看起来合理"，不是真实的电信局分配的区号，不能当真实数据使用。
-        phonePrefix: generateCityPhonePrefix(countryCode, city),
-        postcodes: [],
-      },
-    };
-    root[a1][city][district] ??= {};
-
-    const postcodeList = [...s.postcodes];
-    const houseNumberList = [...s.houseNumbers];
-    root[a1][city][district][s.rawName] = {
-      postcode: postcodeList[0] || '',
-      range: compressHouseNumbers(houseNumberList),
-      // 原始门牌号数组，未压缩。生成具体地址时直接从这里随机取一个真实门牌号即可，
-      // 不需要反解析 range 那个压缩字符串（"1-3, 5" 这种格式）。为空说明这条街
-      // 在采集范围内没有找到任何门牌号标注，生成地址时需要自行决定兜底策略
-      // （比如随机造一个 1-200 的数字，但那就是纯虚构的了，不是真实数据）。
-      houseNumbers: houseNumberList,
+      // 注意：phonePrefix 是根据国家+城市名生成的固定哈希前缀，纯粹为了让生成出来的
+      // 电话号码"看起来合理"，不是真实的电信局分配的区号，不能当真实数据使用。
+      phonePrefix: generateCityPhonePrefix(countryCode, city),
+      postcodes: [],
+      streets: {},
     };
 
-    for (const pc of postcodeList) {
-      if (!root[a1][city]._meta.postcodes.includes(pc)) {
-        root[a1][city]._meta.postcodes.push(pc);
-      }
+    const cityNode = root[a1][city];
+    const range = extractHouseNumberRange(s.houseNumbers);
+    cityNode.streets[s.rawName] = range ? { houseNumberRange: range } : {};
+
+    // 邮编统一存在城市这一级（而不是每条街单独存一份），生成地址时从这个池子里随机挑一个。
+    for (const pc of s.postcodes) {
+      if (!cityNode.postcodes.includes(pc)) cityNode.postcodes.push(pc);
     }
   }
-  return { [countryCode]: root };
+  return root;
+}
+
+// 道路数量按"这个城市实际还需要多少条街道"动态计算，不再对每个城市都固定按同一个
+// 宽松上限去请求——纽约/墨西哥城这类超大都会，路网随便一查就能轻松超过几百条，
+// 但如果这次总共只要 60 条、分摊到 6 个城市每城只要 10 条左右，问它要几百条纯粹是浪费，
+// 也是这类超大城市最容易 504 超时/被判定成爬虫的原因。
+// ROADS_BUFFER_FACTOR / ADDR_BUFFER_FACTOR 是"多要一点做冗余"的倍数——
+// 不是查到多少条道路就有多少条带门牌号证据，需要额外冗余才能保证优先挑选逻辑有得选。
+const ROADS_BUFFER_FACTOR = 5; // 道路：只是确认"这条街真实存在"，冗余倍数不用太高
+const ADDR_BUFFER_FACTOR = 40; // 地址点：很多地址点才能换来一条街的门牌号证据，需要更大冗余
+const MIN_ROADS_QUERY = 20;
+const MIN_ADDR_QUERY = 200;
+
+function computeDynamicCaps(neededCount, opts) {
+  return {
+    maxRoads: Math.min(opts.maxRoadsPerCity, Math.max(MIN_ROADS_QUERY, neededCount * ROADS_BUFFER_FACTOR)),
+    maxAddrPoints: Math.min(opts.maxAddrPointsPerCity, Math.max(MIN_ADDR_QUERY, neededCount * ADDR_BUFFER_FACTOR)),
+  };
+}
+
+async function fetchStreetsForCity(city, radius, opts, neededCount) {
+  const { maxRoads, maxAddrPoints } = computeDynamicCaps(neededCount, opts);
+  const query = buildOverpassQuery(city.lat, city.lon, radius, { maxRoads, maxAddrPoints });
+  const elements = await queryOverpassWithRetry(query);
+  const streetsMap = extractStreetsFromElements(elements);
+  return [...streetsMap.values()];
 }
 
 // ============================== 主流程 ==============================
@@ -451,17 +457,17 @@ async function main() {
   const admin1Map = loadAdmin1Names(admin1Txt);
   const citiesByCountry = loadCitiesForCountries(citiesTxt, admin1Map, opts.countries, opts.citiesPerCountry);
 
-  const index = {
+  const outPath = path.join(opts.outDir, 'addresses.json');
+  const merged = {
     generatedAt: new Date().toISOString(),
-    mode: 'overpass-population-based',
     dataSources: {
       cities: 'GeoNames cities15000 (CC-BY 4.0, https://www.geonames.org/)',
       streets: 'OpenStreetMap via Overpass API (ODbL, https://www.openstreetmap.org/copyright)',
     },
-    limitPerCountry: opts.limit,
+    // 每个国家的轻量统计，方便快速核对，不用为了看一眼数量就把整个 countries 树都读一遍。
+    meta: { limitPerCountry: opts.limit, countries: {} },
     countries: {},
   };
-  const indexPath = path.join(opts.outDir, 'index.json');
 
   for (const cc of opts.countries) {
     const cities = citiesByCountry.get(cc) || [];
@@ -472,54 +478,59 @@ async function main() {
 
     console.log(`::group::======== [ ${cc} ] ========`);
     const citiesWithStreets = [];
+    // 这个国家一共 opts.limit 条，平分到每个城市大概需要多少条——查询上限按这个动态算，
+    // 而不是不管三七二十一都按同一个宽松封顶去问 Overpass 要整座城市的路网。
+    const neededPerCity = Math.ceil(opts.limit / cities.length);
 
     for (const city of cities) {
       const radius = radiusForPopulation(city.population, opts.radiusMetersOverride);
       console.log(`[overpass] ${cc} / ${city.name} (人口 ${city.population.toLocaleString()}, 半径 ${radius}m) 查询中 ...`);
-      try {
-        const query = buildOverpassQuery(city.lat, city.lon, radius, {
-          maxRoads: opts.maxRoadsPerCity,
-          maxAddrPoints: opts.maxAddrPointsPerCity,
-        });
-        const elements = await queryOverpassWithRetry(query);
-        const streetsMap = extractStreetsFromElements(elements);
-        const streets = [...streetsMap.values()];
 
+      let streets = null;
+      try {
+        streets = await fetchStreetsForCity(city, radius, opts, neededPerCity);
+      } catch (firstError) {
+        // 全尺寸半径在所有镜像上都失败了，不直接放弃这个城市——用更小的半径
+        // （约40%，请求更轻，服务器处理更快，更不容易 504/被判定为爬虫）再试一次。
+        const fallbackRadius = Math.max(2000, Math.round(radius * 0.4));
+        console.warn(
+          `  ⚠️ ${city.name} 全尺寸查询失败(${firstError.message})，用更小的半径 ${fallbackRadius}m 重试一次 ...`
+        );
+        try {
+          streets = await fetchStreetsForCity(city, fallbackRadius, opts, neededPerCity);
+          console.warn(`  ↳ ${city.name} 缩小半径后成功了`);
+        } catch (secondError) {
+          console.warn(`  ⚠️ ${city.name} 缩小半径后依然失败，跳过该城市: ${secondError.message}`);
+        }
+      }
+
+      if (streets) {
         if (streets.length < opts.minStreetsWarn) {
           console.warn(`  ⚠️ ${city.name} 只采集到 ${streets.length} 条街道，可能 OSM 在当地标注较少`);
         } else {
           console.log(`  ✓ ${city.name}: 采集到 ${streets.length} 条不同街道`);
         }
-
         citiesWithStreets.push({ city: city.name, admin1: city.admin1, streets });
-      } catch (error) {
-        console.warn(`  ⚠️ ${city.name} Overpass 查询失败，跳过该城市: ${error.message}`);
       }
 
       await sleep(opts.overpassDelayMs); // 限速，善待公共 Overpass 实例
     }
 
     const picked = pickStreetsRoundRobin(citiesWithStreets, opts.limit);
-    const totalAvailable = citiesWithStreets.reduce((sum, c) => sum + c.streets.length, 0);
+    const cityCount = citiesWithStreets.filter((c) => c.streets.length > 0).length;
 
-    const file = `${cc.toLowerCase()}.json`;
-    const treeData = buildTreeJSON(cc, picked);
-    fs.writeFileSync(path.join(opts.outDir, file), JSON.stringify(treeData, null, 2), 'utf8');
+    merged.countries[cc] = buildTreeJSON(cc, picked);
+    merged.meta.countries[cc] = { streetCount: picked.length, cityCount };
 
-    index.countries[cc] = {
-      file,
-      streetCount: picked.length,
-      totalAvailable,
-      cityCount: citiesWithStreets.filter((c) => c.streets.length > 0).length,
-      cities: cities.map((c) => c.name),
-    };
-    fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), 'utf8');
+    // 每处理完一个国家就把整份合并文件重新落盘一次——20 个国家全跑完可能要不少时间，
+    // 中途失败/被取消的话，已经跑完的国家不会白跑，文件里已经有数据了。
+    fs.writeFileSync(outPath, JSON.stringify(merged, null, 2), 'utf8');
 
-    console.log(`✅ ${cc}: 抽取 ${picked.length}/${totalAvailable} 条真实街道，来自 ${citiesWithStreets.length} 个人口密集城市 -> ${file}`);
+    console.log(`✅ ${cc}: 抽取 ${picked.length} 条真实街道，来自 ${cityCount} 个人口密集城市`);
     console.log('::endgroup::');
   }
 
-  console.log(`🎯 采集结束，数据均在: ${opts.outDir}`);
+  console.log(`🎯 采集结束，数据在: ${outPath}`);
 }
 
 main().catch((error) => {
