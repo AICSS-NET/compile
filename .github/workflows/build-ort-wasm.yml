@@ -125,7 +125,20 @@ jobs:
           python3 onnxruntime-src/tools/python/convert_onnx_models_to_ort.py \
             models \
             --optimization_style Fixed
-          echo "生成的算子清单："
+          echo "自动生成的算子清单（补充前）："
+          cat models/required_operators.config
+
+      # 保险措施：不管上面自动扫描有没有漏，强制把 Relu/HardSigmoid/Sigmoid/
+      # Clip/HardSwish/LeakyRelu/PRelu 这批几乎所有卷积网络都会用到的激活函数
+      # 算子加进清单——实测遇到过自动生成的清单缺 Relu/HardSigmoid 导致
+      # "Could not find an implementation" 的报错，具体是自动扫描哪个环节漏的
+      # 还没有百分百定位到（本地用"部分算子会被图优化融合、部分不会"的混合
+      # 场景测试过，机制本身工作正常，没能复现出这个具体缺失，可能是真实模型
+      # 更复杂的结构触发的），先用这批"几乎不会用错"的常见算子兜底。
+      - name: 补充常见激活函数算子（兜底，防止自动扫描漏掉）
+        run: |
+          python3 ort/patch_ops_config.py models/required_operators.config
+          echo "补充后的最终算子清单："
           cat models/required_operators.config
 
       - name: 安装最新版 Emscripten 工具链
