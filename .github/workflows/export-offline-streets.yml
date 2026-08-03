@@ -14,7 +14,7 @@ on:
       limit_per_country:
         description: '每个国家最终导出的街道条数上限'
         required: false
-        default: '60'
+        default: '120'
       user_agent:
         description: >-
           Overpass 请求用的 User-Agent(留空则用仓库变量 OVERPASS_USER_AGENT)。
@@ -38,7 +38,7 @@ jobs:
     # 墨西哥城/纽约这类超大都会偶尔会比较磨人，留够余量避免被 GitHub Actions 自己的
     # job 超时机制打断（打断后会看到 "Error: The operation was canceled." ——
     # 这条消息是 GitHub Actions 自己打的，不是脚本抛出的）。
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
       - name: Checkout self
         uses: actions/checkout@v4
