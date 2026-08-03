@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-在 convert_onnx_models_to_ort.py 自动生成的算子清单基础上，补充一批常见的 CNN
-激活函数算子——不管自动扫描（静态分析优化后的图）有没有漏掉它们，都强制确保
-这些算子在清单里。
+在 convert_onnx_models_to_ort.py 自动生成的算子清单基础上，补充一大批标准
+CNN/序列模型算子——不管自动扫描（静态分析优化后的图）有没有漏掉它们，都强制
+确保这些算子在清单里。
 
-背景：这批算子（Relu/HardSigmoid/Sigmoid/Clip/HardSwish/LeakyRelu/PRelu）几乎
-出现在所有卷积神经网络里，PP-OCR 的骨干网络（MobileNet 系列常用 HardSigmoid/
-HardSwish 做 Squeeze-and-Excitation 注意力模块）大概率会用到其中好几个。实测
-遇到过自动生成的清单缺 Relu/HardSigmoid 导致 "Could not find an
-implementation" 的报错，具体是自动扫描哪个环节漏的还没有百分百定位到（本地用
-"部分算子会被图优化融合、部分不会"的混合场景测试过，机制本身工作正常，没能
-复现出这个具体的缺失——可能是真实模型某个更复杂的结构触发的），所以先加这道
-保险，不管漏没漏、强制把这批常见算子加进去，直接解决当前观察到的报错。
+背景：自动扫描连续几轮分别漏了 Relu、HardSigmoid、Div 这几个非常基础的算子，
+不是偶然漏一两个边缘算子，是对这两个真实 PP-OCR 模型的自动覆盖本来就不够
+完整（具体是自动扫描哪个环节漏的，没有拿到真实模型文件在本地复现出来，没能
+百分百查清楚）。与其继续一轮 workflow 才发现"还差一个"、来回耗时排查，这次
+直接把安全网扩得足够大，覆盖典型 CNN + 序列模型会用到的绝大多数标准算子，
+一次性堵上，接受"编译产物可能比理论最小体积略大一点"的代价换稳定性。
 
 用法：python3 patch_ops_config.py <required_operators.config的路径>
 """
@@ -19,9 +17,45 @@ implementation" 的报错，具体是自动扫描哪个环节漏的还没有百�
 import re
 import sys
 
-# 常见的 CNN 激活函数算子，强制确保包含在清单里。
+# 常见的 CNN / 序列模型算子，强制确保包含在清单里。
+#
+# 背景：自动扫描（convert_onnx_models_to_ort.py）连续几轮分别漏了
+# Relu、HardSigmoid、Div 这几个非常基础的算子——不是偶然漏掉一两个边缘算子，
+# 是对这两个真实模型的自动覆盖本来就不够完整。与其继续一轮跑一次 workflow
+# 才发现"还差一个"、来回耗时，这次直接把安全网扩得足够大，覆盖典型 CNN +
+# 序列模型（PP-OCR 的识别模型部分用到 CTC/序列解码，可能涉及 LSTM/GRU 之类）
+# 会用到的绝大多数标准算子，一次性堵上，接受"可能比理论最小体积略大一点"的
+# 代价换稳定性。
 SAFETY_NET_OPS = {
-    "Relu", "HardSigmoid", "Sigmoid", "Clip", "HardSwish", "LeakyRelu", "PRelu",
+    # 基础算术
+    "Add", "Sub", "Mul", "Div", "Pow", "Sqrt", "Exp", "Log", "Neg", "Abs",
+    "Reciprocal", "Sum", "Mean", "Min", "Max", "Clip", "Sign", "Floor", "Ceil",
+    "Round", "Erf", "CumSum",
+    # 激活函数
+    "Relu", "Sigmoid", "HardSigmoid", "HardSwish", "Tanh", "LeakyRelu", "PRelu",
+    "Softmax", "LogSoftmax", "Elu", "Selu", "Softplus", "Softsign", "Mish", "Gelu",
+    # 卷积/池化/归一化
+    "Conv", "ConvTranspose", "MaxPool", "AveragePool", "GlobalAveragePool",
+    "GlobalMaxPool", "BatchNormalization", "InstanceNormalization", "LRN", "Dropout",
+    # 形状/张量操作
+    "Reshape", "Transpose", "Concat", "Split", "Slice", "Squeeze", "Unsqueeze",
+    "Flatten", "Expand", "Tile", "Pad", "Gather", "GatherElements", "GatherND",
+    "Scatter", "ScatterElements", "ScatterND", "Shape", "Size", "Cast",
+    "ConstantOfShape", "Constant", "Identity", "Where", "Range",
+    # 归约/排序
+    "ReduceMean", "ReduceSum", "ReduceMax", "ReduceMin", "ReduceProd",
+    "ArgMax", "ArgMin", "TopK",
+    # 比较/逻辑
+    "Equal", "Greater", "Less", "GreaterOrEqual", "LessOrEqual", "And", "Or",
+    "Not", "Xor",
+    # 矩阵运算
+    "MatMul", "Gemm",
+    # 序列模型（识别模型的 CTC/序列解码部分可能用到）
+    "LSTM", "GRU", "RNN",
+    # 视觉常用
+    "Resize", "Upsample", "NonMaxSuppression",
+    # 三角函数（部分位置编码/注意力机制会用到）
+    "Sin", "Cos",
 }
 
 LINE_PATTERN = re.compile(r"^(ai\.onnx);([\d,]+);(.+)$")
