@@ -90,13 +90,13 @@ function parseArgs(argv) {
     limit: 60,
     minStreetsWarn: 5,
     workDir: '.geonames-cache',
-    overpassDelayMs: 3000,
+    overpassDelayMs: 2000,
     radiusMetersOverride: null,
     // 单次查询里，Overpass 最多返回多少条"道路"/多少个"带门牌号的地址点"——这两个是
     // 硬性封顶（安全阀），实际请求量会按这个城市当次实际需要多少条街道动态计算，通常远小于
     // 这个封顶值，只有在需要量本身很大时才会顶到这里。
-    maxRoadsPerCity: 600,
-    maxAddrPointsPerCity: 4000,
+    maxRoadsPerCity: 300,
+    maxAddrPointsPerCity: 3000,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
