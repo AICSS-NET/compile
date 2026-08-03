@@ -235,13 +235,12 @@ function loadCitiesForCountries(citiesTxt, admin1Map, countries, citiesPerCountr
 // 半径主要影响服务器端要扫描的范围大小，适当缩小能降低超大城市查询超时的概率）
 function radiusForPopulation(population, override) {
   if (override) return override;
-  // 800万+ 的超级都会(墨西哥城1229万、纽约880万这种)实测哪怕在"500万+"这档参数下
-  // 依然经常触发 504——单独再收紧一档。
-  if (population >= 8_000_000) return 7_000;
-  if (population >= 5_000_000) return 10_000;
-  if (population >= 1_000_000) return 8_000;
-  if (population >= 300_000) return 6_000;
-  return 5_000;
+  // 整体再收紧一档，降低大都市 504 / 超时概率
+  if (population >= 8_000_000) return 2_000; 
+  if (population >= 5_000_000) return 5_000;
+  if (population >= 1_000_000) return 3_000;
+  if (population >= 300_000) return 2_000; 
+  return 3_000; 
 }
 
 // ============================== 第二步：Overpass 查询 & 解析 ==============================
