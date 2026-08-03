@@ -78,7 +78,7 @@ const OVERPASS_ENDPOINTS = [
 
 const DEFAULT_COUNTRIES = [
   'US', 'CA', 'MX', 'GB', 'DE', 'FR', 'IT', 'ES', 'NL', 'RU',
-  'JP', 'KR', 'SG', 'VN', 'TH', 'PH', 'MY', 'IN', 'AU', 'BR',
+  'JP', 'KR', 'ID', 'VN', 'TR', 'ZA', 'MY', 'IN', 'AU', 'BR',
 ];
 
 // ============================== 工具函数 ==============================
