@@ -58,10 +58,15 @@ function generateOneAddress(countryCode, countryTree) {
   const postcode = randomItem(cityNode.postcodes) || '';
   const phone = randomPhoneNumber(cityNode.phonePrefix || '000');
 
-  // 防御性格式化：避免出现 ", -" 这种空行政区占位符，避免邮编为空时出现双空格
-  const adminStr = admin1 !== '-' ? `, ${admin1}` : '';
-  const zipStr = postcode ? ` ${postcode}` : '';
-  const formatted = `${houseNumber} ${streetName}, ${city}${adminStr}${zipStr}, ${countryCode}`;
+  // 【终极强化格式化拼接】动态组合地址段，避免缺失 admin1 或 postcode 时出现冗余标点
+  const parts = [`${houseNumber} ${streetName}`, city];
+  if (admin1 !== '-') parts.push(admin1);
+  
+  let cityAdminZip = parts.join(', ');
+  if (postcode) {
+     cityAdminZip += ` ${postcode}`; // 生成类似 "... , City, State 10001" 或 "... , City 10001"
+  }
+  const formatted = `${cityAdminZip}, ${countryCode}`;
 
   return {
     country: countryCode,
