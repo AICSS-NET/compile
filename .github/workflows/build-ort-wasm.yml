@@ -128,6 +128,24 @@ jobs:
           echo "自动生成的算子清单（补充前）："
           cat models/required_operators.config
 
+      # 根本性的补充措施：不再靠"猜哪个算子容易漏"，而是直接把原始 .onnx 文件
+      # 里字面意义上出现过的每一个算子都扫出来、跟上面的清单取并集。
+      #
+      # 之前已经连续在 Relu、HardSigmoid、Div 这三个非常基础的算子上报过
+      # "Could not find an implementation"——InferenceSession.create() 只会
+      # 报"第一个"找不到的算子就停止，改一个、下次冒出下一个，这样来回拉锯
+      # 解决不完。本地测试还意外验证了根本原因的一部分：如果一个 Conv 节点
+      # 100% 被融合进了 FusedConv，"扫描优化后的图"这条路径就完全看不到独立的
+      # Conv 了——只依赖"先优化、再扫描"这一种方法，天然会漏掉那些只以"融合前
+      # 原始形态"存在于文件里、但没有(或没有完全)被这次跑的优化器融合掉的算子。
+      # 直接对原始文件做穷举扫描，不依赖任何优化器行为，理论上能保证"文件里
+      # 字面写着的算子"一个不漏，从根源上跳出这种一次只发现一个漏洞的循环。
+      - name: 扫描原始 .onnx 文件补全算子清单（不依赖图优化，逐个算子穷举）
+        run: |
+          python3 ort/extract_raw_ops.py models/required_operators.config models
+          echo "扫描后的算子清单："
+          cat models/required_operators.config
+
       # 保险措施：不管上面自动扫描有没有漏，强制把 Relu/HardSigmoid/Sigmoid/
       # Clip/HardSwish/LeakyRelu/PRelu 这批几乎所有卷积网络都会用到的激活函数
       # 算子加进清单——实测遇到过自动生成的清单缺 Relu/HardSigmoid 导致
