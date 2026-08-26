@@ -1,0 +1,123 @@
+name: Build custom Babel standalone bundle
+
+# 手动在 Actions 页点 "Run workflow" 触发。整个构建自包含在这一个文件里，
+# 不需要仓库里有任何其它文件（package.json / entry.js 都在下面用 heredoc
+# 现写现建）。
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 准备构建目录 + 安装依赖
+        run: |
+          mkdir -p build && cd build
+          cat > package.json << 'PKGJSON'
+          {
+            "name": "babel-custom-standalone-build",
+            "private": true,
+            "dependencies": {
+              "@babel/core": "7.29.7",
+              "@babel/preset-env": "7.29.7",
+              "@babel/preset-react": "7.29.7",
+              "@babel/preset-typescript": "7.29.7",
+              "@babel/preset-flow": "7.29.7",
+              "@babel/plugin-transform-modules-commonjs": "7.29.7",
+              "assert": "^2.1.0",
+              "browserify-zlib": "^0.2.0",
+              "buffer": "^6.0.3",
+              "os-browserify": "^0.3.0",
+              "path-browserify": "^1.0.1",
+              "stream-browserify": "^3.0.0",
+              "util": "^0.12.5"
+            },
+            "devDependencies": { "esbuild": "0.23.1" }
+          }
+          PKGJSON
+          npm install --no-audit --no-fund
+
+      # 只认 env / react / typescript / flow 这 4 个 preset + 1 个 CommonJS
+      # 插件——即 code-bridge.js 里 Babel.transform 实际用到的全部。传别的
+      # preset 名字会直接抛错，方便第一时间发现遗漏，而不是静默漏转换。
+      - name: 写入自定义入口文件
+        run: |
+          cd build
+          mkdir -p src
+          cat > shim-empty.js << 'SHIMJS'
+          module.exports = {};
+          SHIMJS
+          cat > src/entry.js << 'ENTRYJS'
+          import { transform } from '@babel/core';
+          import presetEnv from '@babel/preset-env';
+          import presetReact from '@babel/preset-react';
+          import presetTypescript from '@babel/preset-typescript';
+          import presetFlow from '@babel/preset-flow';
+          import pluginTransformModulesCommonJS from '@babel/plugin-transform-modules-commonjs';
+
+          var PRESETS = { env: presetEnv, react: presetReact, typescript: presetTypescript, flow: presetFlow };
+          var PLUGINS = { 'transform-modules-commonjs': pluginTransformModulesCommonJS };
+
+          function resolveEntry(map, item, kind) {
+            if (Array.isArray(item)) {
+              return [resolveEntry(map, item[0], kind), item[1]];
+            }
+            if (typeof item === 'string') {
+              var resolved = map[item];
+              if (!resolved) {
+                throw new Error('Unknown ' + kind + ' "' + item + '". This custom build only includes: ' + Object.keys(map).join(', '));
+              }
+              return resolved;
+            }
+            return item;
+          }
+
+          function customTransform(code, options) {
+            var opts = Object.assign({}, options);
+            if (opts.presets) opts.presets = opts.presets.map(function (p) { return resolveEntry(PRESETS, p, 'preset'); });
+            if (opts.plugins) opts.plugins = opts.plugins.map(function (p) { return resolveEntry(PLUGINS, p, 'plugin'); });
+            opts.babelrc = false;
+            opts.configFile = false;
+            return transform(code, opts);
+          }
+
+          var api = { transform: customTransform, availablePresets: Object.keys(PRESETS), availablePlugins: Object.keys(PLUGINS) };
+          if (typeof window !== 'undefined') { window.Babel = api; }
+          export default api;
+          ENTRYJS
+
+      - name: 打包
+        run: |
+          cd build
+          npx esbuild src/entry.js \
+            --bundle --platform=browser --format=iife --global-name=BabelBundle \
+            --define:process.env.NODE_ENV=\"production\" \
+            --alias:path=path-browserify --alias:fs=./shim-empty.js --alias:module=./shim-empty.js \
+            --alias:assert=assert --alias:os=os-browserify --alias:util=util --alias:zlib=browserify-zlib \
+            --alias:stream=stream-browserify --alias:buffer=buffer \
+            --minify --outfile=dist/babel.custom.min.js
+
+      - name: 报告体积
+        run: |
+          cd build
+          echo "### Bundle size" >> "$GITHUB_STEP_SUMMARY"
+          ls -lh dist/babel.custom.min.js | awk '{print "- raw: " $5}' >> "$GITHUB_STEP_SUMMARY"
+          gzip -kf dist/babel.custom.min.js
+          ls -lh dist/babel.custom.min.js.gz | awk '{print "- gzip: " $5}' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "⚠️ 只要保留 env 这个 preset（用于 JS -> ES5，targets 是运行时" >> "$GITHUB_STEP_SUMMARY"
+          echo "browserslist 查询字符串），体积就不会比官方版小多少——大头是" >> "$GITHUB_STEP_SUMMARY"
+          echo "core-js-compat / caniuse-lite / browserslist 这几张兼容性数据表，" >> "$GITHUB_STEP_SUMMARY"
+          echo "没法在构建期裁剪。真要瘦身请改用按需异步加载。" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: babel-custom-bundle
+          path: |
+            build/dist/babel.custom.min.js
+            build/dist/babel.custom.min.js.gz
+          retention-days: 30
