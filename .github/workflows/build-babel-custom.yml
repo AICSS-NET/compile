@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: 准备构建目录 + 安装依赖
         run: |
@@ -213,13 +213,3 @@ jobs:
             build/dist/babel.custom.min.js
             build/dist/babel.custom.min.js.gz
           retention-days: 30
-
-      - name: 创建 Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          files: |
-            build/dist/babel.custom.min.js
-            build/dist/babel.custom.min.js.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
