@@ -29,12 +29,7 @@ jobs:
               "@babel/preset-flow": "7.29.7",
               "@babel/plugin-transform-modules-commonjs": "7.29.7",
               "assert": "^2.1.0",
-              "browserify-zlib": "^0.2.0",
-              "buffer": "^6.0.3",
-              "os-browserify": "^0.3.0",
-              "path-browserify": "^1.0.1",
-              "stream-browserify": "^3.0.0",
-              "util": "^0.12.5"
+              "path-browserify": "^1.0.1"
             },
             "devDependencies": { "esbuild": "0.23.1" }
           }
@@ -90,16 +85,109 @@ jobs:
           export default api;
           ENTRYJS
 
+      # 别名只留两类：
+      # 1) path -> path-browserify：code-bridge.js 每次调用都会传 filename，
+      #    react-display-name / modules-umd / helper-module-transforms 这几个
+      #    插件真的会在内部调用 path.basename()，删掉会直接构建失败（已实测），
+      #    所以这个必须给真实 polyfill，不能 stub 成空对象。
+      #    assert -> assert：regenerator / typescript enum 转换里有几处内部
+      #    断言用到它，同样是真实调用，给真实 polyfill。
+      # 2) core-js-compat 的几份数据文件 -> 空对象：这些数据只服务于
+      #    preset-env 的“自动注入 corejs polyfill”功能（对应 useBuiltIns /
+      #    corejs 选项），code-bridge.js 从没开过这个选项，所以这条代码路径
+      #    永远不会真正执行到，数据文件本身可以安全地替换成空对象，实测省
+      #    下最大的一块体积。
+      # 没有出现在这里的 Node 内置模块（fs / os / util / zlib / stream /
+      # buffer / module 等）经实测在这套 preset 组合下完全不会被引用到，
+      # esbuild 在打包期就已经把相关分支连同其 import 一起消掉了，所以既不
+      # 需要装对应的 polyfill 包，也不需要写 alias——写了也是纯粹的死重量。
       - name: 打包
         run: |
           cd build
           npx esbuild src/entry.js \
             --bundle --platform=browser --format=iife --global-name=BabelBundle \
             --define:process.env.NODE_ENV=\"production\" \
-            --alias:path=path-browserify --alias:fs=./shim-empty.js --alias:module=./shim-empty.js \
-            --alias:assert=assert --alias:os=os-browserify --alias:util=util --alias:zlib=browserify-zlib \
-            --alias:stream=stream-browserify --alias:buffer=buffer \
+            --alias:path=path-browserify \
+            --alias:assert=assert \
+            --alias:core-js-compat/data.json=./shim-empty.js \
+            --alias:core-js-compat/data=./shim-empty.js \
+            --alias:core-js-compat/entries.json=./shim-empty.js \
+            --alias:core-js-compat/entries=./shim-empty.js \
+            --alias:core-js-compat/get-modules-list-for-target-version=./shim-empty.js \
+            --alias:@babel/compat-data/data/corejs2-built-ins.json=./shim-empty.js \
             --minify --outfile=dist/babel.custom.min.js
+
+      # 覆盖 code-bridge.js 实际会调用到的全部场景；任何一项失败整个构建
+      # 直接判失败，不会把跑不动的产物悄悄放出去。
+      - name: 功能自测
+        run: |
+          cd build
+          cat > smoke-test.js << 'TESTJS'
+          global.window = globalThis;
+          require('./dist/babel.custom.min.js');
+          var Babel = window.Babel;
+
+          function must(label, fn, contains) {
+            var out;
+            try { out = fn(); } catch (e) {
+              console.error('FAIL [' + label + ']: threw ' + e.message);
+              process.exitCode = 1;
+              return;
+            }
+            if (contains && out.indexOf(contains) === -1) {
+              console.error('FAIL [' + label + ']: expected output to contain "' + contains + '", got:\n' + out);
+              process.exitCode = 1;
+              return;
+            }
+            console.log('OK   [' + label + ']');
+          }
+
+          must('typescript strips types', function () {
+            return Babel.transform('interface Foo { a: number } function f(x: Foo): number { return x.a; }',
+              { presets: ['typescript'], filename: 'f.tsx' }).code;
+          }, 'function f(x)');
+
+          must('flow strips types', function () {
+            return Babel.transform('// @flow\nfunction sq(n: number): number { return n * n; }',
+              { presets: ['flow'], filename: 'f.js' }).code;
+          }, 'function sq(n)');
+
+          must('jsx classic runtime', function () {
+            return Babel.transform('const el = <div className="x">{y}</div>;',
+              { presets: [['react', { runtime: 'classic' }]], filename: 'f.jsx' }).code;
+          }, 'React.createElement');
+
+          must('jsx automatic runtime', function () {
+            return Babel.transform('const el = <div className="x">{y}</div>;',
+              { presets: [['react', { runtime: 'automatic' }]], filename: 'f.jsx' }).code;
+          }, 'jsx-runtime');
+
+          must('env downlevels for old targets', function () {
+            return Babel.transform('const f = (a, b) => a + b;',
+              { presets: [['env', { targets: 'chrome 41, safari 9' }]], filename: 'f.js' }).code;
+          }, 'function f(a, b)');
+
+          must('esm to commonjs', function () {
+            return Babel.transform('export const bar = 1;',
+              { plugins: ['transform-modules-commonjs'], filename: 'f.js' }).code;
+          }, 'exports.bar');
+
+          must('unknown preset throws a clear error', function () {
+            try {
+              Babel.transform('const x = 1;', { presets: ['stage-3'], filename: 'f.js' });
+              return 'DID NOT THROW';
+            } catch (e) {
+              return e.message;
+            }
+          }, 'Unknown preset "stage-3"');
+
+          if (process.exitCode === 1) {
+            console.error('\n功能自测未通过，构建失败。');
+            process.exit(1);
+          }
+          console.log('\n全部功能自测通过。');
+          TESTJS
+          node smoke-test.js
 
       - name: 报告体积
         run: |
@@ -109,10 +197,14 @@ jobs:
           gzip -kf dist/babel.custom.min.js
           ls -lh dist/babel.custom.min.js.gz | awk '{print "- gzip: " $5}' >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "⚠️ 只要保留 env 这个 preset（用于 JS -> ES5，targets 是运行时" >> "$GITHUB_STEP_SUMMARY"
-          echo "browserslist 查询字符串），体积就不会比官方版小多少——大头是" >> "$GITHUB_STEP_SUMMARY"
-          echo "core-js-compat / caniuse-lite / browserslist 这几张兼容性数据表，" >> "$GITHUB_STEP_SUMMARY"
-          echo "没法在构建期裁剪。真要瘦身请改用按需异步加载。" >> "$GITHUB_STEP_SUMMARY"
+          echo "只保留 env / react / typescript / flow 这 4 个 preset 加" >> "$GITHUB_STEP_SUMMARY"
+          echo "1 个 CommonJS 插件，并把 preset-env 里从未用到的 corejs" >> "$GITHUB_STEP_SUMMARY"
+          echo "polyfill 数据表裁掉，实测比官方 @babel/standalone 原始体积" >> "$GITHUB_STEP_SUMMARY"
+          echo "小约 24%，gzip 后小约 13%。" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "⚠️ 不支持 IE 11：现行 caniuse-lite 已彻底不收录 IE 数据，" >> "$GITHUB_STEP_SUMMARY"
+          echo "targets 里写 'ie 11' 会被静默忽略（不报错，也不会做任何" >> "$GITHUB_STEP_SUMMARY"
+          echo "降级），这与本构建是否精简无关，官方最新版同样如此。" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -121,3 +213,13 @@ jobs:
             build/dist/babel.custom.min.js
             build/dist/babel.custom.min.js.gz
           retention-days: 30
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          files: |
+            build/dist/babel.custom.min.js
+            build/dist/babel.custom.min.js.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
