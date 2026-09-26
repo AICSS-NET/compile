@@ -1,0 +1,111 @@
+name: Build pdf.js (原生 <script> 版，非 module)
+
+# 用法：
+# 1. Actions 页面手动触发（workflow_dispatch），填一个 pdf.js 的版本号，比如 6.3.289
+#    （对应 GitHub 上的 tag v6.3.289，https://github.com/mozilla/pdf.js/tags）。
+# 2. 构建产物会作为 Artifact 上传，可以在这次运行页面底部直接下载 pdfjs-legacy.zip。
+# 3. 如果把 commit_to_repo 勾成 true，还会把产物直接提交回当前仓库的
+#    dest_dir 目录（默认 bak/js/tool），免去手动下载再上传。
+#
+# 关键点：官方仓库自带一个专门给"不支持/不想用 ES Module 的老式页面"用的构建任务
+# gulp generic-legacy，产出的 pdf.js / pdf.worker.js 是老式 IIFE 脚本——
+# 没有顶层 import.meta、没有顶层 export，可以直接用普通 <script src="..."></script>
+# 加载，不需要 type="module"。对应 gulp generic（非 legacy）才是现在默认发布到
+# npm/cdn 上的纯 ESM 构建。
+
+on:
+  workflow_dispatch:
+    inputs:
+      pdfjs_version:
+        description: '要构建的 pdf.js 版本号（对应仓库 tag，不带 v 前缀，如 6.3.289）'
+        required: true
+        default: '6.3.289'
+      commit_to_repo:
+        description: '是否把构建产物直接提交回本仓库'
+        required: false
+        default: 'false'
+        type: boolean
+      dest_dir:
+        description: '提交回仓库时，产物存放的目录'
+        required: false
+        default: 'bak/js/tool'
+
+# 所有硬编码的路径/常量集中放在这里，方便以后调整
+env:
+  PDFJS_REPO: mozilla/pdf.js
+  PDFJS_SRC_DIR: pdfjs-src
+  NODE_VERSION: '20'
+  LEGACY_BUILD_DIR: pdfjs-src/build/generic-legacy/build
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 第一步：checkout 当前仓库自己（提交产物、以及后面复制文件都要用到）
+      - name: Checkout 当前仓库
+        uses: actions/checkout@v4
+
+      # 第二步：单独把 pdf.js 官方源码 checkout 到子目录，锁定到指定 tag，
+      # 保证每次构建版本可控、可重现
+      - name: Checkout pdf.js 源码 (v${{ github.event.inputs.pdfjs_version }})
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PDFJS_REPO }}
+          ref: v${{ github.event.inputs.pdfjs_version }}
+          path: ${{ env.PDFJS_SRC_DIR }}
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.PDFJS_SRC_DIR }}/package-lock.json
+
+      # gulp generic-legacy 只是打包浏览器脚本，用不到 canvas 原生编译；
+      # 但 npm ci 会按 package.json 把所有 devDependencies 一起装上，
+      # 其中可能包含需要系统库才能编译成功的原生依赖，这里预先装好常见的几个，
+      # 避免在没有这些库的 runner 上 npm ci 直接失败。
+      - name: 安装系统依赖（供原生模块编译用）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
+
+      - name: 安装 pdf.js 依赖
+        working-directory: ${{ env.PDFJS_SRC_DIR }}
+        run: npm ci
+
+      # 核心步骤：生成非 module 的老式版本（pdf.js + pdf.worker.js）
+      - name: 构建 generic-legacy（非 module 版本）
+        working-directory: ${{ env.PDFJS_SRC_DIR }}
+        run: npx gulp generic-legacy
+
+      - name: 检查构建产物是否存在
+        run: |
+          ls -la "${{ env.LEGACY_BUILD_DIR }}"
+          test -f "${{ env.LEGACY_BUILD_DIR }}/pdf.js"
+          test -f "${{ env.LEGACY_BUILD_DIR }}/pdf.worker.js"
+
+      # 打成 Artifact，方便不需要自动提交时手动下载
+      - name: 上传构建产物为 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdfjs-legacy-${{ github.event.inputs.pdfjs_version }}
+          path: |
+            ${{ env.LEGACY_BUILD_DIR }}/pdf.js
+            ${{ env.LEGACY_BUILD_DIR }}/pdf.worker.js
+          if-no-files-found: error
+
+      # 可选：直接把两个文件提交回当前仓库指定目录，省去手动下载/上传这一步
+      - name: 复制产物到目标目录
+        if: ${{ github.event.inputs.commit_to_repo == 'true' }}
+        run: |
+          mkdir -p "${{ github.event.inputs.dest_dir }}"
+          cp "${{ env.LEGACY_BUILD_DIR }}/pdf.js" "${{ github.event.inputs.dest_dir }}/pdfjs.js"
+          cp "${{ env.LEGACY_BUILD_DIR }}/pdf.worker.js" "${{ github.event.inputs.dest_dir }}/pdfjs.worker.js"
+
+      - name: 提交变更
+        if: ${{ github.event.inputs.commit_to_repo == 'true' }}
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: 更新 pdf.js 到 v${{ github.event.inputs.pdfjs_version }}（generic-legacy，非 module 版）"
+          file_pattern: ${{ github.event.inputs.dest_dir }}/pdfjs.js ${{ github.event.inputs.dest_dir }}/pdfjs.worker.js
