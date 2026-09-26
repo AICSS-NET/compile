@@ -31,13 +31,20 @@ name: Build pdf.js (原生 <script> 版，单文件，非 module)
 # （src/display/api.js），这是 Worker 自己的加载方式，跟主线程那个 <script>
 # 标签是不是 type="module" 完全无关。
 #
-# 构建完成后，会把 worker 转成 base64、拼成一个 data: URI，追加到主文件末尾，
-# 并自动写好 `pdfjsLib.GlobalWorkerOptions.workerSrc`。这样最终交付的就是
-# 真正的单文件（没有任何外部依赖、不产生任何网络请求），双击本地打开、内网/
-# 完全离线环境都能直接用。`new Worker(dataURI, { type: "module" })` 在当前
-# 主流浏览器（Chrome/Edge/新版 Firefox）都受支持；如果目标环境是非常古老的
-# 浏览器导致 worker 创建失败，pdf.js 会退化到在主线程里跑（阻塞 UI 但依然能
-# 用），不会直接报错崩溃。
+# 构建完成后，会用 .github/scripts/embed-pdfjs-worker.mjs 把 worker 源码
+# 内嵌进主文件末尾，并自动写好 `pdfjsLib.GlobalWorkerOptions.workerSrc`。
+# 这样最终交付的就是真正的单文件（没有任何外部依赖、不产生任何网络请求），
+# 双击本地打开、内网/完全离线环境都能直接用。
+#
+# 内嵌用的是 Blob 方案，不是 base64 data: URI：worker 源码原样以 JS 字符串
+# 字面量的形式塞进主文件（用 JSON.stringify 转义特殊字符，不是整体重编码），
+# 运行时用 `new Blob([code]) + URL.createObjectURL(...)` 生成一个本地
+# blob: URL 交给 workerSrc。相比 base64，省掉了 base64 固有的约 33% 体积
+# 膨胀；而且 `new Worker(blobURL, { type: "module" })` 这种加载方式的浏览器
+# 兼容性也比 `new Worker(dataURL, { type: "module" })` 更稳（部分旧版本
+# 浏览器对 data: URI 作为 module worker 处理不一致，blob: 支持得更早更一致）。
+# 如果目标环境实在太老导致 worker 创建失败，pdf.js 会退化到在主线程里跑
+# （阻塞 UI 但依然能用），不会直接报错崩溃。
 #
 # 这套补丁已经在 v6.3.289 上完整跑通验证：产出的 pdf.min.js 能通过
 # `node --check`（合法经典脚本语法，不含 import.meta / 顶层 export），
@@ -73,6 +80,7 @@ env:
   # 注意：这里换成了 minified-legacy 的产物目录（不是 generic-legacy）
   MINIFIED_LEGACY_BUILD_DIR: pdfjs-src/build/minified-legacy/build
   PATCH_SCRIPT: .github/scripts/patch-pdfjs-legacy.py
+  EMBED_SCRIPT: .github/scripts/embed-pdfjs-worker.mjs
   # 单文件合并后的最终产物名
   OUTPUT_SINGLE_FILE: pdfjs.js
 
@@ -146,27 +154,18 @@ jobs:
 
           echo "校验通过：pdf.min.js 是合法的非 module 经典脚本"
 
-      # 把 worker 转成 base64 的 data: URI，追加到主文件末尾，并自动设置
-      # GlobalWorkerOptions.workerSrc。这一步之后，pdf.min.js 就是一个
-      # 完全自包含、不产生任何网络请求的单文件。
-      - name: 合并成单文件（把 worker 内嵌进主文件）
-        working-directory: ${{ env.PDFJS_SRC_DIR }}
+      # 用 embed-pdfjs-worker.mjs 把 worker 内嵌进主文件（Blob 方案，
+      # 不是 base64 data: URI，脚本内有详细对比说明）。这一步之后，
+      # pdf.min.js 就是一个完全自包含、不产生任何网络请求的单文件。
+      - name: 合并成单文件（Blob 方案，把 worker 内嵌进主文件）
         run: |
           set -e
-          cd build/minified-legacy/build
-          WORKER_B64=$(base64 -w 0 pdf.worker.min.mjs)
-          cp pdf.min.js "${{ env.OUTPUT_SINGLE_FILE }}"
-          cat >> "${{ env.OUTPUT_SINGLE_FILE }}" << EOF
-
-          (function () {
-            var src = "data:text/javascript;base64,${WORKER_B64}";
-            if (typeof window !== "undefined" && window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
-              window.pdfjsLib.GlobalWorkerOptions.workerSrc = src;
-            }
-          })();
-          EOF
-          node --check "${{ env.OUTPUT_SINGLE_FILE }}"
-          ls -la "${{ env.OUTPUT_SINGLE_FILE }}"
+          node "${{ env.EMBED_SCRIPT }}" \
+            "${{ env.MINIFIED_LEGACY_BUILD_DIR }}/pdf.min.js" \
+            "${{ env.MINIFIED_LEGACY_BUILD_DIR }}/pdf.worker.min.mjs" \
+            "${{ env.MINIFIED_LEGACY_BUILD_DIR }}/${{ env.OUTPUT_SINGLE_FILE }}"
+          node --check "${{ env.MINIFIED_LEGACY_BUILD_DIR }}/${{ env.OUTPUT_SINGLE_FILE }}"
+          ls -la "${{ env.MINIFIED_LEGACY_BUILD_DIR }}/${{ env.OUTPUT_SINGLE_FILE }}"
 
       # 打成 Artifact，方便不需要自动提交时手动下载。
       # 现在只有一个文件：pdfjs.js（主文件 + 内嵌 worker，无 .map）
