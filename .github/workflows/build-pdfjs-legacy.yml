@@ -1,4 +1,4 @@
-name: Build pdf.js (原生 <script> 版，非 module)
+name: Build pdf.js (原生 <script> 版，单文件，非 module)
 
 # ============================================================================
 # 背景（决定了这个 workflow 为什么长这样，实测于 v6.3.289）：
@@ -11,21 +11,35 @@ name: Build pdf.js (原生 <script> 版，非 module)
 # `Uncaught SyntaxError: Cannot use 'import.meta' outside a module`。
 # 官方已经不再提供真正的非 module（UMD/经典脚本）构建了。
 #
+# 这个 workflow 用的是 `gulp minified-legacy`，而不是 `generic-legacy`：
+# 两者内部都调用同一个 createMainBundle()，区别只是 minified-legacy 额外
+# 传了 MINIFIED: true——webpack 会用 Terser 压缩，并且完全不生成 sourcemap
+# （gulpfile.mjs 里 enableSourceMaps 一遇到 MINIFIED 就会关掉）。产物体积和
+# CDN 上发布的 pdf.min.js 是同一量级，而不是未压缩的调试版。
+#
 # 所以这个 workflow 在构建前，会用 .github/scripts/patch-pdfjs-legacy.py
-# 给 checkout 下来的 gulpfile.mjs 打两处小补丁（脚本里有详细注释）：
-#   1. 主文件（pdf.js）的 webpack 输出从 ESM 改成 UMD，这样加载后会在全局
-#      挂一个 window.pdfjsLib，用法和老版本 pdfjs-dist@3.x 完全一样。
+# 给 checkout 下来的 gulpfile.mjs 打两处小补丁（脚本里有详细注释，两处补丁
+# generic-legacy / minified-legacy 通用，不用跟着改）：
+#   1. 主文件（pdf.js / pdf.min.js）的 webpack 输出从 ESM 改成 UMD，这样加载后
+#      会在全局挂一个 window.pdfjsLib，用法和老版本 pdfjs-dist@3.x 完全一样。
 #   2. 只在生成这个非 ESM 主文件时，才打开 webpack 对 import.meta.url 的
 #      内置转换（源码里 Node 专用分支用到了它，ESM 产物里本来就合法，
 #      不需要转换；非 ESM 产物里这行字面量是非法语法，必须让 webpack 转换掉）。
 #
-# 只改主文件，worker（pdf.worker.mjs）保持官方原生 ESM 不变：pdf.js 内部创建
-# worker 用的是 `new Worker(workerSrc, { type: "module" })`（src/display/api.js），
-# 这是 Worker 自己的加载方式，跟主线程那个 <script> 标签是不是 type="module"
-# 完全无关，所以 worker 不需要跟着改，两者版本也天然保持一致，不用像
-# CDN 拼接方案那样自己去对版本号。
+# 只改主文件，worker（pdf.worker.min.mjs）保持官方原生 ESM 不变：pdf.js 内部
+# 创建 worker 用的是 `new Worker(workerSrc, { type: "module" })`
+# （src/display/api.js），这是 Worker 自己的加载方式，跟主线程那个 <script>
+# 标签是不是 type="module" 完全无关。
 #
-# 这套补丁已经在 v6.3.289 上完整跑通验证：产出的 pdf.js 能通过
+# 构建完成后，会把 worker 转成 base64、拼成一个 data: URI，追加到主文件末尾，
+# 并自动写好 `pdfjsLib.GlobalWorkerOptions.workerSrc`。这样最终交付的就是
+# 真正的单文件（没有任何外部依赖、不产生任何网络请求），双击本地打开、内网/
+# 完全离线环境都能直接用。`new Worker(dataURI, { type: "module" })` 在当前
+# 主流浏览器（Chrome/Edge/新版 Firefox）都受支持；如果目标环境是非常古老的
+# 浏览器导致 worker 创建失败，pdf.js 会退化到在主线程里跑（阻塞 UI 但依然能
+# 用），不会直接报错崩溃。
+#
+# 这套补丁已经在 v6.3.289 上完整跑通验证：产出的 pdf.min.js 能通过
 # `node --check`（合法经典脚本语法，不含 import.meta / 顶层 export），
 # 在浏览器环境（用 jsdom 模拟真实 <script> 执行）里
 # window.pdfjsLib.getDocument / window.pdfjsLib.GlobalWorkerOptions 都能正常拿到。
@@ -56,8 +70,11 @@ env:
   PDFJS_REPO: mozilla/pdf.js
   PDFJS_SRC_DIR: pdfjs-src
   NODE_VERSION: '20'
-  LEGACY_BUILD_DIR: pdfjs-src/build/generic-legacy/build
+  # 注意：这里换成了 minified-legacy 的产物目录（不是 generic-legacy）
+  MINIFIED_LEGACY_BUILD_DIR: pdfjs-src/build/minified-legacy/build
   PATCH_SCRIPT: .github/scripts/patch-pdfjs-legacy.py
+  # 单文件合并后的最终产物名
+  OUTPUT_SINGLE_FILE: pdfjs.js
 
 jobs:
   build:
@@ -83,7 +100,7 @@ jobs:
           cache: 'npm'
           cache-dependency-path: ${{ env.PDFJS_SRC_DIR }}/package-lock.json
 
-      # gulp generic-legacy 只是打包浏览器脚本，用不到 canvas 原生编译；
+      # gulp minified-legacy 只是打包浏览器脚本，用不到 canvas 原生编译；
       # 但 npm ci 会按 package.json 把所有 devDependencies 一起装上，
       # 其中可能包含需要系统库才能编译成功的原生依赖，这里预先装好常见的几个，
       # 避免在没有这些库的 runner 上 npm ci 直接失败。
@@ -99,66 +116,78 @@ jobs:
       - name: 打补丁：主文件改成非 module（UMD）输出
         run: python3 "${{ env.PATCH_SCRIPT }}" "${{ env.PDFJS_SRC_DIR }}/gulpfile.mjs"
 
-      # 生成产物：主文件是打了补丁的非 module 版本（pdf.js），
-      # worker（pdf.worker.mjs）保持官方原生 ESM
-      - name: 构建 generic-legacy
+      # 生成产物：主文件是打了补丁的非 module 压缩版（pdf.min.js），
+      # worker（pdf.worker.min.mjs）保持官方原生 ESM，同样是压缩版
+      - name: 构建 minified-legacy
         working-directory: ${{ env.PDFJS_SRC_DIR }}
-        run: npx gulp generic-legacy
+        run: npx gulp minified-legacy
 
       - name: 校验构建产物
         working-directory: ${{ env.PDFJS_SRC_DIR }}
         run: |
           set -e
-          ls -la build/generic-legacy/build
+          ls -la build/minified-legacy/build
 
-          test -f build/generic-legacy/build/pdf.js
-          test -f build/generic-legacy/build/pdf.worker.mjs
+          test -f build/minified-legacy/build/pdf.min.js
+          test -f build/minified-legacy/build/pdf.worker.min.mjs
 
           # 用 Node 自带的语法检查确认主文件是合法的"经典脚本"
           # （如果补丁没生效，这里会因为里面还有 import.meta/export 而直接报语法错误）
-          node --check build/generic-legacy/build/pdf.js
+          node --check build/minified-legacy/build/pdf.min.js
 
-          if grep -q "import\.meta" build/generic-legacy/build/pdf.js; then
-            echo "::error::pdf.js 里还残留 import.meta，补丁没有完全生效"
+          if grep -q "import\.meta" build/minified-legacy/build/pdf.min.js; then
+            echo "::error::pdf.min.js 里还残留 import.meta，补丁没有完全生效"
             exit 1
           fi
-          if grep -qE "^export " build/generic-legacy/build/pdf.js; then
-            echo "::error::pdf.js 里还有顶层 export，补丁没有完全生效"
+          if grep -qE "^export " build/minified-legacy/build/pdf.min.js; then
+            echo "::error::pdf.min.js 里还有顶层 export，补丁没有完全生效"
             exit 1
           fi
 
-          echo "校验通过：pdf.js 是合法的非 module 经典脚本"
+          echo "校验通过：pdf.min.js 是合法的非 module 经典脚本"
 
-      # 打成 Artifact，方便不需要自动提交时手动下载
+      # 把 worker 转成 base64 的 data: URI，追加到主文件末尾，并自动设置
+      # GlobalWorkerOptions.workerSrc。这一步之后，pdf.min.js 就是一个
+      # 完全自包含、不产生任何网络请求的单文件。
+      - name: 合并成单文件（把 worker 内嵌进主文件）
+        working-directory: ${{ env.PDFJS_SRC_DIR }}
+        run: |
+          set -e
+          cd build/minified-legacy/build
+          WORKER_B64=$(base64 -w 0 pdf.worker.min.mjs)
+          cp pdf.min.js "${{ env.OUTPUT_SINGLE_FILE }}"
+          cat >> "${{ env.OUTPUT_SINGLE_FILE }}" << EOF
+
+          (function () {
+            var src = "data:text/javascript;base64,${WORKER_B64}";
+            if (typeof window !== "undefined" && window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
+              window.pdfjsLib.GlobalWorkerOptions.workerSrc = src;
+            }
+          })();
+          EOF
+          node --check "${{ env.OUTPUT_SINGLE_FILE }}"
+          ls -la "${{ env.OUTPUT_SINGLE_FILE }}"
+
+      # 打成 Artifact，方便不需要自动提交时手动下载。
+      # 现在只有一个文件：pdfjs.js（主文件 + 内嵌 worker，无 .map）
       - name: 上传构建产物为 Artifact
         uses: actions/upload-artifact@v4
         with:
           name: pdfjs-legacy-${{ github.event.inputs.pdfjs_version }}
           path: |
-            ${{ env.LEGACY_BUILD_DIR }}/pdf.js
-            ${{ env.LEGACY_BUILD_DIR }}/pdf.js.map
-            ${{ env.LEGACY_BUILD_DIR }}/pdf.worker.mjs
-            ${{ env.LEGACY_BUILD_DIR }}/pdf.worker.mjs.map
+            ${{ env.MINIFIED_LEGACY_BUILD_DIR }}/${{ env.OUTPUT_SINGLE_FILE }}
           if-no-files-found: error
 
       # 可选：直接把产物提交回当前仓库指定目录，省去手动下载/上传这一步。
-      # worker 文件特意从 .mjs 重命名成 .js：内容还是原生 ESM，
-      # pdf.js 内部一直是用 `new Worker(url, {type:'module'})` 加载它的，
-      # 跟文件扩展名无关；改成 .js 只是为了迁就一些老式静态文件服务器——
-      # 它们通常认识 .js 该配什么 Content-Type（text/javascript），
-      # 但不一定认识 .mjs，容易配成 application/octet-stream 之类导致浏览器拒绝执行。
-      # 如果你确定自己的服务器/CDN 对 .mjs 也能返回正确的 JS MIME 类型，
-      # 也可以把下面这行改成保留 .mjs 后缀。
       - name: 复制产物到目标目录
         if: ${{ github.event.inputs.commit_to_repo == 'true' }}
         run: |
           mkdir -p "${{ github.event.inputs.dest_dir }}"
-          cp "${{ env.LEGACY_BUILD_DIR }}/pdf.js" "${{ github.event.inputs.dest_dir }}/pdfjs.js"
-          cp "${{ env.LEGACY_BUILD_DIR }}/pdf.worker.mjs" "${{ github.event.inputs.dest_dir }}/pdfjs.worker.js"
+          cp "${{ env.MINIFIED_LEGACY_BUILD_DIR }}/${{ env.OUTPUT_SINGLE_FILE }}" "${{ github.event.inputs.dest_dir }}/pdfjs.js"
 
       - name: 提交变更
         if: ${{ github.event.inputs.commit_to_repo == 'true' }}
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: 更新 pdf.js 到 v${{ github.event.inputs.pdfjs_version }}（非 module 经典脚本版）"
-          file_pattern: ${{ github.event.inputs.dest_dir }}/pdfjs.js ${{ github.event.inputs.dest_dir }}/pdfjs.worker.js
+          commit_message: "chore: 更新 pdf.js 到 v${{ github.event.inputs.pdfjs_version }}（单文件非 module 压缩版）"
+          file_pattern: ${{ github.event.inputs.dest_dir }}/pdfjs.js
